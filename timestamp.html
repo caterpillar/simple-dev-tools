@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>时间戳</title>
+<meta name="description" content="本地离线 Unix 时间戳转换：当前时间戳、秒/毫秒/微秒/纳秒自动识别、日期转时间戳与多时区显示。">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="toolbox.css">
+<script src="toolbox-nav.js"></script>
+<style>
+  .ts-main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  .ts-wrap { max-width: 980px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .card-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 14px; border-bottom: 1px solid var(--border);
+    font-size: 13.5px; font-weight: 600;
+  }
+  .card-head .badge { margin-left: auto; font-weight: 600; }
+  .card-body { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .row button, .row select, .row input {
+    height: var(--ctl-h); padding: 0 var(--ctl-px);
+    font-size: var(--ctl-fs); line-height: 1.2; border-radius: var(--ctl-r);
+  }
+  .row input { flex: 1 1 260px; min-width: 0; font-family: var(--mono); }
+  .toolbar select#tz { flex: 0 1 280px; min-width: 0; }
+  .stats { display: flex; flex-wrap: wrap; gap: 8px 40px; }
+  .stat { min-width: 0; }
+  .stat-label { font-size: 12px; color: var(--muted); }
+  .stat-val { font: 600 30px/1.25 var(--mono); font-variant-numeric: tabular-nums; color: var(--text); word-break: break-all; }
+  .stat-val.main { color: var(--accent); }
+  .now-line { font-family: var(--mono); font-size: 13.5px; overflow-wrap: anywhere; }
+  .now-line .dim { color: var(--muted); }
+  .ts-msg { font-size: 12.5px; color: var(--muted); }
+  .ts-msg.error { color: var(--err); }
+  .ts-msg.note { color: var(--warn); }
+  .card .kv tr:last-child th, .card .kv tr:last-child td { border-bottom: 0; }
+  .card .kv { border-top: 1px solid var(--border); }
+  .kv th { min-width: 130px; padding-left: 14px; }
+  .kv td { word-break: normal; overflow-wrap: anywhere; }
+  .kv td.empty { color: var(--placeholder); }
+  .kv td.act { width: 1%; padding: 4px 14px 4px 6px; vertical-align: middle; font-family: inherit; }
+  .kv td.act button { padding: 2px 10px; font-size: 12px; line-height: 1.4; }
+  @media (max-width: 560px) {
+    .ts-wrap { padding: 10px; gap: 10px; }
+    .stat-val { font-size: 24px; }
+    .kv th, .kv td { padding-left: 8px; padding-right: 8px; }
+    .kv th { white-space: normal; min-width: 64px; }
+  }
+</style>
+</head>
+<body>
+<header class="titlebar">
+  <nav class="tool-tabs" id="toolTabs" data-current="timestamp"></nav>
+  <div class="titlebar-right" id="toolboxControls"></div>
+</header>
+
+<div class="toolbar">
+  <label class="tb-label" for="tz" data-i18n="tb.zone">时区</label>
+  <select id="tz"></select>
+</div>
+
+<main class="ts-main">
+  <div class="ts-wrap">
+    <section class="card">
+      <div class="card-head"><span data-i18n="sec.now">当前时间</span><span class="badge warn" id="pausedTag" data-i18n="now.paused" hidden>已暂停</span></div>
+      <div class="card-body">
+        <div class="stats">
+          <div class="stat"><div class="stat-label" data-i18n="now.sec">秒</div><div class="stat-val main" id="nowSec"></div></div>
+          <div class="stat"><div class="stat-label" data-i18n="now.ms">毫秒</div><div class="stat-val" id="nowMs"></div></div>
+        </div>
+        <div class="now-line"><span id="nowWall"></span> <span class="dim" id="nowZone"></span></div>
+        <div class="row">
+          <button type="button" id="btnCopySec" data-i18n="btn.copySec">复制秒</button>
+          <button type="button" id="btnCopyMs" data-i18n="btn.copyMs">复制毫秒</button>
+          <button type="button" id="btnPause"></button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head" data-i18n="sec.ts">时间戳 → 日期</div>
+      <div class="card-body">
+        <div class="row">
+          <input type="text" id="tsInput" spellcheck="false" autocomplete="off" data-i18n-ph="ph.ts" data-i18n-aria="aria.ts">
+          <select id="tsUnit" data-i18n-aria="aria.unit">
+            <option value="auto" data-i18n="unit.auto">自动</option>
+            <option value="s" data-i18n="unit.s">秒</option>
+            <option value="ms" data-i18n="unit.ms">毫秒</option>
+            <option value="us" data-i18n="unit.us">微秒</option>
+            <option value="ns" data-i18n="unit.ns">纳秒</option>
+          </select>
+          <button type="button" id="btnTsNow" data-i18n="btn.useNow">使用当前时间</button>
+        </div>
+        <div class="ts-msg" id="tsMsg" hidden></div>
+      </div>
+      <table class="kv" id="tsTable"></table>
+    </section>
+
+    <section class="card">
+      <div class="card-head" data-i18n="sec.date">日期 → 时间戳</div>
+      <div class="card-body">
+        <div class="row">
+          <input type="text" id="dateInput" spellcheck="false" autocomplete="off" data-i18n-ph="ph.date" data-i18n-aria="aria.date">
+          <button type="button" id="btnDateNow" data-i18n="btn.now">现在</button>
+        </div>
+        <div class="ts-msg" id="dateMsg"></div>
+      </div>
+      <table class="kv" id="dateTable"></table>
+    </section>
+  </div>
+</main>
+
+<footer class="status">
+  <span class="badge idle" id="badge"></span>
+  <span class="status-msg" id="msg"></span>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  const TEXT = {
+    'zh-CN': {
+      'tb.zone': '时区', 'tz.local': '本地（{0}）', 'tz.common': '常用时区', 'tz.all': '全部时区',
+      'sec.now': '当前时间', 'sec.ts': '时间戳 → 日期', 'sec.date': '日期 → 时间戳',
+      'now.sec': '秒', 'now.ms': '毫秒', 'now.paused': '已暂停',
+      'btn.copySec': '复制秒', 'btn.copyMs': '复制毫秒', 'btn.pause': '暂停', 'btn.resume': '继续',
+      'aria.ts': '时间戳', 'aria.unit': '时间戳单位', 'aria.date': '日期时间',
+      'ph.ts': '例如 1700000000、1700000000123 或 -86400',
+      'unit.auto': '自动', 'unit.s': '秒', 'unit.ms': '毫秒', 'unit.us': '微秒', 'unit.ns': '纳秒',
+      'btn.useNow': '使用当前时间', 'btn.now': '现在',
+      'row.unit': '识别为', 'row.zone': '所选时区', 'row.utc': 'UTC', 'row.iso': 'ISO 8601', 'row.rfc': 'RFC 7231（HTTP）',
+      'row.rel': '相对时间', 'row.weekday': '星期', 'row.week': 'ISO 周数',
+      'row.sec': '秒', 'row.ms': '毫秒', 'row.isoUtc': 'ISO 8601（UTC）',
+      'val.auto': '{0}（按 {1} 位整数自动识别）', 'val.manual': '{0}（手动指定）',
+      'ph.date': '例如 2026-03-08 14:30:00 或 2026-03-08T06:30:00Z',
+      'hint.formats': '支持 YYYY-MM-DD HH:mm:ss.SSS、YYYY/MM/DD HH:mm、仅日期，以及带 T 和 Z / ±hh:mm 的 ISO 8601',
+      'hint.zone': '按所选时区 {0}（{1}）解释',
+      'hint.offset': '输入自带偏移 {0}，已忽略所选时区',
+      'note.gap': '{0} 在 {1} 因夏令时跳过而不存在，已顺延为 {2}',
+      'note.overlap': '{0} 在 {1} 出现两次（夏令时结束），已取较早的一次（{2}）',
+      'err.nan': '不是有效的时间戳：只能包含数字，可带负号和小数点',
+      'err.sep': '请去掉千位分隔符（逗号、下划线或空格）',
+      'err.digits': '整数部分有 {0} 位，超过 19 位无法自动识别，请手动选择单位',
+      'err.range': '超出可表示范围：日期只能在 1970 年前后约 27.5 万年内（±8.64×10¹⁵ 毫秒）',
+      'err.format': '无法识别的日期格式，请使用 YYYY-MM-DD HH:mm:ss 或 ISO 8601',
+      'err.month': '月份 {0} 无效，应为 1–12',
+      'err.day': '日期 {0} 无效：{1} 年 {2} 月只有 {3} 天',
+      'err.hour': '小时 {0} 无效，应为 0–23', 'err.minute': '分钟 {0} 无效，应为 0–59', 'err.second': '秒 {0} 无效，应为 0–59',
+      'err.offset': '时区偏移 {0} 无效',
+      'badge.idle': '待输入', 'badge.ok': '成功', 'badge.err': '错误',
+      'msg.idle': '输入时间戳或日期即可实时转换',
+      'msg.ts': '已转换（{0}）：{1}', 'msg.date': '已转换：{0} 秒 · {1} 毫秒'
+    },
+    'zh-TW': {
+      'tb.zone': '時區', 'tz.local': '本機（{0}）', 'tz.common': '常用時區', 'tz.all': '所有時區',
+      'sec.now': '目前時間', 'sec.ts': '時間戳 → 日期', 'sec.date': '日期 → 時間戳',
+      'now.sec': '秒', 'now.ms': '毫秒', 'now.paused': '已暫停',
+      'btn.copySec': '複製秒', 'btn.copyMs': '複製毫秒', 'btn.pause': '暫停', 'btn.resume': '繼續',
+      'aria.ts': '時間戳', 'aria.unit': '時間戳單位', 'aria.date': '日期時間',
+      'ph.ts': '例如 1700000000、1700000000123 或 -86400',
+      'unit.auto': '自動', 'unit.s': '秒', 'unit.ms': '毫秒', 'unit.us': '微秒', 'unit.ns': '奈秒',
+      'btn.useNow': '使用目前時間', 'btn.now': '現在',
+      'row.unit': '辨識為', 'row.zone': '所選時區', 'row.utc': 'UTC', 'row.iso': 'ISO 8601', 'row.rfc': 'RFC 7231（HTTP）',
+      'row.rel': '相對時間', 'row.weekday': '星期', 'row.week': 'ISO 週數',
+      'row.sec': '秒', 'row.ms': '毫秒', 'row.isoUtc': 'ISO 8601（UTC）',
+      'val.auto': '{0}（依 {1} 位整數自動辨識）', 'val.manual': '{0}（手動指定）',
+      'ph.date': '例如 2026-03-08 14:30:00 或 2026-03-08T06:30:00Z',
+      'hint.formats': '支援 YYYY-MM-DD HH:mm:ss.SSS、YYYY/MM/DD HH:mm、僅日期，以及帶 T 與 Z / ±hh:mm 的 ISO 8601',
+      'hint.zone': '依所選時區 {0}（{1}）解讀',
+      'hint.offset': '輸入已帶偏移 {0}，已忽略所選時區',
+      'note.gap': '{0} 在 {1} 因日光節約時間跳過而不存在，已順延為 {2}',
+      'note.overlap': '{0} 在 {1} 出現兩次（日光節約時間結束），已取較早的一次（{2}）',
+      'err.nan': '不是有效的時間戳：只能包含數字，可帶負號與小數點',
+      'err.sep': '請移除千分位分隔符號（逗號、底線或空格）',
+      'err.digits': '整數部分有 {0} 位，超過 19 位無法自動辨識，請手動選擇單位',
+      'err.range': '超出可表示範圍：日期只能在 1970 年前後約 27.5 萬年內（±8.64×10¹⁵ 毫秒）',
+      'err.format': '無法辨識的日期格式，請使用 YYYY-MM-DD HH:mm:ss 或 ISO 8601',
+      'err.month': '月份 {0} 無效，應為 1–12',
+      'err.day': '日期 {0} 無效：{1} 年 {2} 月只有 {3} 天',
+      'err.hour': '小時 {0} 無效，應為 0–23', 'err.minute': '分鐘 {0} 無效，應為 0–59', 'err.second': '秒 {0} 無效，應為 0–59',
+      'err.offset': '時區偏移 {0} 無效',
+      'badge.idle': '待輸入', 'badge.ok': '成功', 'badge.err': '錯誤',
+      'msg.idle': '輸入時間戳或日期即可即時轉換',
+      'msg.ts': '已轉換（{0}）：{1}', 'msg.date': '已轉換：{0} 秒 · {1} 毫秒'
+    },
+    en: {
+      'tb.zone': 'Time zone', 'tz.local': 'Local ({0})', 'tz.common': 'Common', 'tz.all': 'All time zones',
+      'sec.now': 'Current time', 'sec.ts': 'Timestamp → Date', 'sec.date': 'Date → Timestamp',
+      'now.sec': 'Seconds', 'now.ms': 'Milliseconds', 'now.paused': 'Paused',
+      'btn.copySec': 'Copy s', 'btn.copyMs': 'Copy ms', 'btn.pause': 'Pause', 'btn.resume': 'Resume',
+      'aria.ts': 'Timestamp', 'aria.unit': 'Timestamp unit', 'aria.date': 'Date and time',
+      'ph.ts': 'e.g. 1700000000, 1700000000123 or -86400',
+      'unit.auto': 'Auto', 'unit.s': 'Seconds', 'unit.ms': 'Milliseconds', 'unit.us': 'Microseconds', 'unit.ns': 'Nanoseconds',
+      'btn.useNow': 'Use now', 'btn.now': 'Now',
+      'row.unit': 'Detected as', 'row.zone': 'Selected zone', 'row.utc': 'UTC', 'row.iso': 'ISO 8601', 'row.rfc': 'RFC 7231 (HTTP)',
+      'row.rel': 'Relative', 'row.weekday': 'Weekday', 'row.week': 'ISO week',
+      'row.sec': 'Seconds', 'row.ms': 'Milliseconds', 'row.isoUtc': 'ISO 8601 (UTC)',
+      'val.auto': '{0} (auto-detected from {1} integer digits)', 'val.manual': '{0} (set manually)',
+      'ph.date': 'e.g. 2026-03-08 14:30:00 or 2026-03-08T06:30:00Z',
+      'hint.formats': 'Accepts YYYY-MM-DD HH:mm:ss.SSS, YYYY/MM/DD HH:mm, date only, and ISO 8601 with T and Z / ±hh:mm',
+      'hint.zone': 'Interpreted in the selected zone {0} ({1})',
+      'hint.offset': 'The input has its own offset {0}; the selected zone is ignored',
+      'note.gap': '{0} does not exist in {1} (skipped by daylight saving); moved forward to {2}',
+      'note.overlap': '{0} occurs twice in {1} (daylight saving ends); using the earlier one ({2})',
+      'err.nan': 'Not a valid timestamp: use digits with an optional minus sign and decimal point',
+      'err.sep': 'Please remove thousands separators (commas, underscores or spaces)',
+      'err.digits': 'The integer part has {0} digits; more than 19 cannot be detected automatically, so choose a unit',
+      'err.range': 'Out of range: dates must lie within about 275,000 years of 1970 (±8.64×10¹⁵ ms)',
+      'err.format': 'Unrecognized date format; use YYYY-MM-DD HH:mm:ss or ISO 8601',
+      'err.month': 'Invalid month {0}; must be 1–12',
+      'err.day': 'Invalid day {0}: month {2} of {1} has only {3} days',
+      'err.hour': 'Invalid hour {0}; must be 0–23', 'err.minute': 'Invalid minute {0}; must be 0–59', 'err.second': 'Invalid second {0}; must be 0–59',
+      'err.offset': 'Invalid UTC offset {0}',
+      'badge.idle': 'Waiting', 'badge.ok': 'Done', 'badge.err': 'Error',
+      'msg.idle': 'Type a timestamp or a date to convert it live',
+      'msg.ts': 'Converted ({0}): {1}', 'msg.date': 'Converted: {0} s · {1} ms'
+    },
+    ja: {
+      'tb.zone': 'タイムゾーン', 'tz.local': 'ローカル（{0}）', 'tz.common': 'よく使うタイムゾーン', 'tz.all': 'すべてのタイムゾーン',
+      'sec.now': '現在時刻', 'sec.ts': 'タイムスタンプ → 日時', 'sec.date': '日時 → タイムスタンプ',
+      'now.sec': '秒', 'now.ms': 'ミリ秒', 'now.paused': '一時停止中',
+      'btn.copySec': '秒をコピー', 'btn.copyMs': 'ミリ秒をコピー', 'btn.pause': '一時停止', 'btn.resume': '再開',
+      'aria.ts': 'タイムスタンプ', 'aria.unit': 'タイムスタンプの単位', 'aria.date': '日時',
+      'ph.ts': '例：1700000000、1700000000123、-86400',
+      'unit.auto': '自動', 'unit.s': '秒', 'unit.ms': 'ミリ秒', 'unit.us': 'マイクロ秒', 'unit.ns': 'ナノ秒',
+      'btn.useNow': '現在時刻を使う', 'btn.now': '現在',
+      'row.unit': '判定結果', 'row.zone': '選択中のゾーン', 'row.utc': 'UTC', 'row.iso': 'ISO 8601', 'row.rfc': 'RFC 7231（HTTP）',
+      'row.rel': '相対時間', 'row.weekday': '曜日', 'row.week': 'ISO 週番号',
+      'row.sec': '秒', 'row.ms': 'ミリ秒', 'row.isoUtc': 'ISO 8601（UTC）',
+      'val.auto': '{0}（整数部 {1} 桁から自動判定）', 'val.manual': '{0}（手動指定）',
+      'ph.date': '例：2026-03-08 14:30:00、2026-03-08T06:30:00Z',
+      'hint.formats': 'YYYY-MM-DD HH:mm:ss.SSS、YYYY/MM/DD HH:mm、日付のみ、T と Z / ±hh:mm 付きの ISO 8601 に対応',
+      'hint.zone': '選択中のタイムゾーン {0}（{1}）として解釈',
+      'hint.offset': '入力にオフセット {0} が含まれるため、選択中のタイムゾーンは無視します',
+      'note.gap': '{0} は {1} では夏時間の切り替えで存在しないため、{2} に繰り下げました',
+      'note.overlap': '{0} は {1} では 2 回現れます（夏時間の終了）。早い方（{2}）を採用しました',
+      'err.nan': '有効なタイムスタンプではありません：数字と、必要に応じてマイナス記号・小数点のみ使えます',
+      'err.sep': '桁区切り（カンマ、アンダースコア、空白）を取り除いてください',
+      'err.digits': '整数部が {0} 桁あります。19 桁を超えると自動判定できないため、単位を選んでください',
+      'err.range': '範囲外です：日時は 1970 年の前後約 27.5 万年以内（±8.64×10¹⁵ ミリ秒）に限られます',
+      'err.format': '日時の形式を認識できません。YYYY-MM-DD HH:mm:ss または ISO 8601 を使ってください',
+      'err.month': '月 {0} は無効です（1–12）',
+      'err.day': '日 {0} は無効です：{1} 年 {2} 月は {3} 日までです',
+      'err.hour': '時 {0} は無効です（0–23）', 'err.minute': '分 {0} は無効です（0–59）', 'err.second': '秒 {0} は無効です（0–59）',
+      'err.offset': 'UTC オフセット {0} は無効です',
+      'badge.idle': '入力待ち', 'badge.ok': '完了', 'badge.err': 'エラー',
+      'msg.idle': 'タイムスタンプか日時を入力すると、その場で変換します',
+      'msg.ts': '変換しました（{0}）：{1}', 'msg.date': '変換しました：{0} 秒 · {1} ミリ秒'
+    },
+    ko: {
+      'tb.zone': '시간대', 'tz.local': '로컬 ({0})', 'tz.common': '자주 쓰는 시간대', 'tz.all': '모든 시간대',
+      'sec.now': '현재 시간', 'sec.ts': '타임스탬프 → 날짜', 'sec.date': '날짜 → 타임스탬프',
+      'now.sec': '초', 'now.ms': '밀리초', 'now.paused': '일시 정지됨',
+      'btn.copySec': '초 복사', 'btn.copyMs': '밀리초 복사', 'btn.pause': '일시 정지', 'btn.resume': '계속',
+      'aria.ts': '타임스탬프', 'aria.unit': '타임스탬프 단위', 'aria.date': '날짜와 시간',
+      'ph.ts': '예: 1700000000, 1700000000123 또는 -86400',
+      'unit.auto': '자동', 'unit.s': '초', 'unit.ms': '밀리초', 'unit.us': '마이크로초', 'unit.ns': '나노초',
+      'btn.useNow': '현재 시간 사용', 'btn.now': '지금',
+      'row.unit': '인식 결과', 'row.zone': '선택한 시간대', 'row.utc': 'UTC', 'row.iso': 'ISO 8601', 'row.rfc': 'RFC 7231 (HTTP)',
+      'row.rel': '상대 시간', 'row.weekday': '요일', 'row.week': 'ISO 주차',
+      'row.sec': '초', 'row.ms': '밀리초', 'row.isoUtc': 'ISO 8601 (UTC)',
+      'val.auto': '{0} (정수 {1}자리로 자동 인식)', 'val.manual': '{0} (직접 지정)',
+      'ph.date': '예: 2026-03-08 14:30:00 또는 2026-03-08T06:30:00Z',
+      'hint.formats': 'YYYY-MM-DD HH:mm:ss.SSS, YYYY/MM/DD HH:mm, 날짜만, T 와 Z / ±hh:mm 이 있는 ISO 8601 을 지원합니다',
+      'hint.zone': '선택한 시간대 {0} ({1}) 기준으로 해석합니다',
+      'hint.offset': '입력에 오프셋 {0} 이(가) 있어 선택한 시간대는 무시합니다',
+      'note.gap': '{0} 은(는) {1} 에서 서머타임 전환으로 존재하지 않아 {2} (으)로 옮겼습니다',
+      'note.overlap': '{0} 은(는) {1} 에서 두 번 나타납니다(서머타임 종료). 이른 쪽({2})을 사용합니다',
+      'err.nan': '올바른 타임스탬프가 아닙니다: 숫자와 선택적인 음수 부호, 소수점만 쓸 수 있습니다',
+      'err.sep': '천 단위 구분 기호(쉼표, 밑줄, 공백)를 지워 주세요',
+      'err.digits': '정수 부분이 {0}자리입니다. 19자리를 넘으면 자동 인식할 수 없으니 단위를 선택하세요',
+      'err.range': '범위를 벗어났습니다: 날짜는 1970년 전후 약 27만 5천 년 이내(±8.64×10¹⁵ 밀리초)여야 합니다',
+      'err.format': '날짜 형식을 인식할 수 없습니다. YYYY-MM-DD HH:mm:ss 또는 ISO 8601 을 사용하세요',
+      'err.month': '월 {0} 이(가) 올바르지 않습니다 (1–12)',
+      'err.day': '일 {0} 이(가) 올바르지 않습니다: {1}년 {2}월은 {3}일까지입니다',
+      'err.hour': '시 {0} 이(가) 올바르지 않습니다 (0–23)', 'err.minute': '분 {0} 이(가) 올바르지 않습니다 (0–59)', 'err.second': '초 {0} 이(가) 올바르지 않습니다 (0–59)',
+      'err.offset': 'UTC 오프셋 {0} 이(가) 올바르지 않습니다',
+      'badge.idle': '입력 대기', 'badge.ok': '완료', 'badge.err': '오류',
+      'msg.idle': '타임스탬프나 날짜를 입력하면 바로 변환합니다',
+      'msg.ts': '변환 완료({0}): {1}', 'msg.date': '변환 완료: {0}초 · {1}밀리초'
+    },
+    es: {
+      'tb.zone': 'Zona horaria', 'tz.local': 'Local ({0})', 'tz.common': 'Habituales', 'tz.all': 'Todas las zonas',
+      'sec.now': 'Hora actual', 'sec.ts': 'Marca de tiempo → Fecha', 'sec.date': 'Fecha → Marca de tiempo',
+      'now.sec': 'Segundos', 'now.ms': 'Milisegundos', 'now.paused': 'En pausa',
+      'btn.copySec': 'Copiar s', 'btn.copyMs': 'Copiar ms', 'btn.pause': 'Pausar', 'btn.resume': 'Reanudar',
+      'aria.ts': 'Marca de tiempo', 'aria.unit': 'Unidad', 'aria.date': 'Fecha y hora',
+      'ph.ts': 'p. ej. 1700000000, 1700000000123 o -86400',
+      'unit.auto': 'Auto', 'unit.s': 'Segundos', 'unit.ms': 'Milisegundos', 'unit.us': 'Microsegundos', 'unit.ns': 'Nanosegundos',
+      'btn.useNow': 'Usar ahora', 'btn.now': 'Ahora',
+      'row.unit': 'Detectado como', 'row.zone': 'Zona elegida', 'row.utc': 'UTC', 'row.iso': 'ISO 8601', 'row.rfc': 'RFC 7231 (HTTP)',
+      'row.rel': 'Relativo', 'row.weekday': 'Día', 'row.week': 'Semana ISO',
+      'row.sec': 'Segundos', 'row.ms': 'Milisegundos', 'row.isoUtc': 'ISO 8601 (UTC)',
+      'val.auto': '{0} (detectado por {1} dígitos enteros)', 'val.manual': '{0} (elegido a mano)',
+      'ph.date': 'p. ej. 2026-03-08 14:30:00 o 2026-03-08T06:30:00Z',
+      'hint.formats': 'Admite YYYY-MM-DD HH:mm:ss.SSS, YYYY/MM/DD HH:mm, solo fecha e ISO 8601 con T y Z / ±hh:mm',
+      'hint.zone': 'Interpretado en la zona elegida {0} ({1})',
+      'hint.offset': 'La entrada incluye el desfase {0}; se ignora la zona elegida',
+      'note.gap': '{0} no existe en {1} (salto del horario de verano); se ha movido a {2}',
+      'note.overlap': '{0} ocurre dos veces en {1} (fin del horario de verano); se usa la primera ({2})',
+      'err.nan': 'No es una marca de tiempo válida: usa dígitos con signo menos y punto decimal opcionales',
+      'err.sep': 'Quita los separadores de miles (comas, guiones bajos o espacios)',
+      'err.digits': 'La parte entera tiene {0} dígitos; con más de 19 no se puede detectar la unidad, elígela a mano',
+      'err.range': 'Fuera de rango: la fecha debe estar a menos de unos 275 000 años de 1970 (±8,64×10¹⁵ ms)',
+      'err.format': 'Formato de fecha no reconocido; usa YYYY-MM-DD HH:mm:ss o ISO 8601',
+      'err.month': 'Mes {0} no válido; debe ser 1–12',
+      'err.day': 'Día {0} no válido: el mes {2} de {1} solo tiene {3} días',
+      'err.hour': 'Hora {0} no válida; debe ser 0–23', 'err.minute': 'Minuto {0} no válido; debe ser 0–59', 'err.second': 'Segundo {0} no válido; debe ser 0–59',
+      'err.offset': 'Desfase UTC {0} no válido',
+      'badge.idle': 'En espera', 'badge.ok': 'Listo', 'badge.err': 'Error',
+      'msg.idle': 'Escribe una marca de tiempo o una fecha para convertirla al instante',
+      'msg.ts': 'Convertido ({0}): {1}', 'msg.date': 'Convertido: {0} s · {1} ms'
+    },
+    fr: {
+      'tb.zone': 'Fuseau', 'tz.local': 'Local ({0})', 'tz.common': 'Courants', 'tz.all': 'Tous les fuseaux',
+      'sec.now': 'Heure actuelle', 'sec.ts': 'Horodatage → Date', 'sec.date': 'Date → Horodatage',
+      'now.sec': 'Secondes', 'now.ms': 'Millisecondes', 'now.paused': 'En pause',
+      'btn.copySec': 'Copier s', 'btn.copyMs': 'Copier ms', 'btn.pause': 'Pause', 'btn.resume': 'Reprendre',
+      'aria.ts': 'Horodatage', 'aria.unit': 'Unité', 'aria.date': 'Date et heure',
+      'ph.ts': 'ex. 1700000000, 1700000000123 ou -86400',
+      'unit.auto': 'Auto', 'unit.s': 'Secondes', 'unit.ms': 'Millisecondes', 'unit.us': 'Microsecondes', 'unit.ns': 'Nanosecondes',
+      'btn.useNow': 'Insérer maintenant', 'btn.now': 'Maintenant',
+      'row.unit': 'Détecté comme', 'row.zone': 'Fuseau choisi', 'row.utc': 'UTC', 'row.iso': 'ISO 8601', 'row.rfc': 'RFC 7231 (HTTP)',
+      'row.rel': 'Relatif', 'row.weekday': 'Jour', 'row.week': 'Semaine ISO',
+      'row.sec': 'Secondes', 'row.ms': 'Millisecondes', 'row.isoUtc': 'ISO 8601 (UTC)',
+      'val.auto': '{0} (détecté d’après {1} chiffres entiers)', 'val.manual': '{0} (choisi manuellement)',
+      'ph.date': 'ex. 2026-03-08 14:30:00 ou 2026-03-08T06:30:00Z',
+      'hint.formats': 'Formats acceptés : YYYY-MM-DD HH:mm:ss.SSS, YYYY/MM/DD HH:mm, date seule et ISO 8601 avec T et Z / ±hh:mm',
+      'hint.zone': 'Interprété dans le fuseau choisi {0} ({1})',
+      'hint.offset': 'L’entrée contient son propre décalage {0} ; le fuseau choisi est ignoré',
+      'note.gap': '{0} n’existe pas dans le fuseau {1} (passage à l’heure d’été) ; décalé à {2}',
+      'note.overlap': '{0} existe deux fois dans le fuseau {1} (retour à l’heure d’hiver) ; la première occurrence est retenue ({2})',
+      'err.nan': 'Horodatage invalide : uniquement des chiffres, avec signe moins et point décimal facultatifs',
+      'err.sep': 'Supprimez les séparateurs de milliers (virgules, tirets bas ou espaces)',
+      'err.digits': 'La partie entière compte {0} chiffres ; au-delà de 19, l’unité ne peut pas être détectée : choisissez-la',
+      'err.range': 'Hors limites : la date doit se situer à moins d’environ 275 000 ans de 1970 (±8,64×10¹⁵ ms)',
+      'err.format': 'Format de date non reconnu ; utilisez YYYY-MM-DD HH:mm:ss ou ISO 8601',
+      'err.month': 'Mois {0} invalide ; il doit être compris entre 1 et 12',
+      'err.day': 'Jour {0} invalide : le mois {2} de {1} ne compte que {3} jours',
+      'err.hour': 'Heure {0} invalide ; elle doit être comprise entre 0 et 23', 'err.minute': 'Minute {0} invalide ; elle doit être comprise entre 0 et 59', 'err.second': 'Seconde {0} invalide ; elle doit être comprise entre 0 et 59',
+      'err.offset': 'Décalage UTC {0} invalide',
+      'badge.idle': 'En attente', 'badge.ok': 'Terminé', 'badge.err': 'Erreur',
+      'msg.idle': 'Saisissez un horodatage ou une date pour le convertir en direct',
+      'msg.ts': 'Converti ({0}) : {1}', 'msg.date': 'Converti : {0} s · {1} ms'
+    },
+    de: {
+      'tb.zone': 'Zeitzone', 'tz.local': 'Lokal ({0})', 'tz.common': 'Häufig', 'tz.all': 'Alle Zeitzonen',
+      'sec.now': 'Aktuelle Zeit', 'sec.ts': 'Zeitstempel → Datum', 'sec.date': 'Datum → Zeitstempel',
+      'now.sec': 'Sekunden', 'now.ms': 'Millisekunden', 'now.paused': 'Pausiert',
+      'btn.copySec': 's kopieren', 'btn.copyMs': 'ms kopieren', 'btn.pause': 'Pause', 'btn.resume': 'Fortsetzen',
+      'aria.ts': 'Zeitstempel', 'aria.unit': 'Einheit', 'aria.date': 'Datum und Uhrzeit',
+      'ph.ts': 'z. B. 1700000000, 1700000000123 oder -86400',
+      'unit.auto': 'Auto', 'unit.s': 'Sekunden', 'unit.ms': 'Millisekunden', 'unit.us': 'Mikrosekunden', 'unit.ns': 'Nanosekunden',
+      'btn.useNow': 'Jetzt einsetzen', 'btn.now': 'Jetzt',
+      'row.unit': 'Erkannt als', 'row.zone': 'Gewählte Zone', 'row.utc': 'UTC', 'row.iso': 'ISO 8601', 'row.rfc': 'RFC 7231 (HTTP)',
+      'row.rel': 'Relativ', 'row.weekday': 'Wochentag', 'row.week': 'ISO-Woche',
+      'row.sec': 'Sekunden', 'row.ms': 'Millisekunden', 'row.isoUtc': 'ISO 8601 (UTC)',
+      'val.auto': '{0} (erkannt an {1} Ganzzahlstellen)', 'val.manual': '{0} (manuell gewählt)',
+      'ph.date': 'z. B. 2026-03-08 14:30:00 oder 2026-03-08T06:30:00Z',
+      'hint.formats': 'Unterstützt YYYY-MM-DD HH:mm:ss.SSS, YYYY/MM/DD HH:mm, nur Datum sowie ISO 8601 mit T und Z / ±hh:mm',
+      'hint.zone': 'Interpretiert in der gewählten Zone {0} ({1})',
+      'hint.offset': 'Die Eingabe hat einen eigenen Offset {0}; die gewählte Zone wird ignoriert',
+      'note.gap': '{0} existiert in {1} nicht (Sprung der Sommerzeit); verschoben auf {2}',
+      'note.overlap': '{0} kommt in {1} zweimal vor (Ende der Sommerzeit); der frühere Zeitpunkt wird verwendet ({2})',
+      'err.nan': 'Kein gültiger Zeitstempel: nur Ziffern, optional mit Minuszeichen und Dezimalpunkt',
+      'err.sep': 'Bitte Tausendertrennzeichen entfernen (Kommas, Unterstriche oder Leerzeichen)',
+      'err.digits': 'Der ganzzahlige Teil hat {0} Stellen; über 19 Stellen ist keine automatische Erkennung möglich, bitte Einheit wählen',
+      'err.range': 'Außerhalb des Bereichs: Das Datum muss innerhalb von etwa 275.000 Jahren um 1970 liegen (±8,64×10¹⁵ ms)',
+      'err.format': 'Unbekanntes Datumsformat; bitte YYYY-MM-DD HH:mm:ss oder ISO 8601 verwenden',
+      'err.month': 'Ungültiger Monat {0}; erlaubt sind 1–12',
+      'err.day': 'Ungültiger Tag {0}: Monat {2} im Jahr {1} hat nur {3} Tage',
+      'err.hour': 'Ungültige Stunde {0}; erlaubt sind 0–23', 'err.minute': 'Ungültige Minute {0}; erlaubt sind 0–59', 'err.second': 'Ungültige Sekunde {0}; erlaubt sind 0–59',
+      'err.offset': 'Ungültiger UTC-Offset {0}',
+      'badge.idle': 'Wartet', 'badge.ok': 'Fertig', 'badge.err': 'Fehler',
+      'msg.idle': 'Zeitstempel oder Datum eingeben – die Umrechnung erfolgt sofort',
+      'msg.ts': 'Umgerechnet ({0}): {1}', 'msg.date': 'Umgerechnet: {0} s · {1} ms'
+    }
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const DAY = 86400000;
+  const MAX_MS = 8.64e15;
+  const MAX_NS = 8640000000000000000000n;
+  const TZ_KEY = 'toolbox-timestamp-tz';
+  const COMMON_ZONES = ['Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore', 'Asia/Kolkata', 'Europe/London', 'Europe/Paris',
+    'Europe/Berlin', 'America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Australia/Sydney'];
+  const UNIT_NS = { s: 1000000000n, ms: 1000000n, us: 1000n, ns: 1n };
+  const UNIT_FRAC = { s: 9, ms: 6, us: 3, ns: 0 };
+  const UNIT_BASE_DIGITS = { s: 0, ms: 3, us: 6, ns: 9 };
+  const REL_UNITS = [['year', 31536000], ['month', 2592000], ['week', 604800], ['day', 86400], ['hour', 3600], ['minute', 60], ['second', 1]];
+  const TS_ROWS = ['unit', 'zone', 'utc', 'iso', 'rfc', 'rel', 'weekday', 'week'];
+  const DATE_ROWS = ['sec', 'ms', 'isoUtc'];
+
+  const LOCAL_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const fmtCache = new Map();
+  const cells = {};
+  let zoneChoice = 'local';
+  let paused = false;
+  let shownNow = Date.now();
+  let active = null;
+  let tsState = null;
+  let dateState = null;
+  let lastSec = 0;
+
+  const store = {
+    get() { try { return localStorage.getItem(TZ_KEY); } catch (e) { return null; } },
+    set(v) { try { localStorage.setItem(TZ_KEY, v); } catch (e) { /* 存储不可用时仅本次生效 */ } }
+  };
+
+  const page = Toolbox.initPage({ current: 'timestamp', text: TEXT, onLang: renderAll });
+  const tr = page.tr;
+  const zone = () => (zoneChoice === 'local' ? LOCAL_ZONE : zoneChoice);
+
+  // ===== 日历算法：不受 Date 范围限制，负年份按天文纪年（ISO） =====
+  function daysFromCivil(y, m, d) {
+    y -= m <= 2 ? 1 : 0;
+    const era = Math.floor(y / 400);
+    const yoe = y - era * 400;
+    const doy = Math.floor((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1;
+    return era * 146097 + yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy - 719468;
+  }
+
+  function civilFromDays(z) {
+    z += 719468;
+    const era = Math.floor(z / 146097);
+    const doe = z - era * 146097;
+    const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
+    const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+    const mp = Math.floor((5 * doy + 2) / 153);
+    const m = mp < 10 ? mp + 3 : mp - 9;
+    return { y: yoe + era * 400 + (m <= 2 ? 1 : 0), m, d: doy - Math.floor((153 * mp + 2) / 5) + 1 };
+  }
+
+  const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const monthDays = (y, m) => (m === 2 ? (isLeap(y) ? 29 : 28) : [31, 0, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]);
+  const pad = (n, w) => String(n).padStart(w || 2, '0');
+  const fmtYear = (y) => (y >= 0 && y <= 9999 ? pad(y, 4) : (y < 0 ? '-' : '+') + pad(Math.abs(y), 6));
+
+  function zoneFormatter(tz) {
+    if (!fmtCache.has(tz)) {
+      fmtCache.set(tz, new Intl.DateTimeFormat('en-US-u-ca-gregory-nu-latn', {
+        timeZone: tz, hourCycle: 'h23', era: 'short',
+        year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric'
+      }));
+    }
+    return fmtCache.get(tz);
+  }
+
+  // 时区在 t 时刻相对 UTC 的偏移（毫秒）
+  function offsetAt(t, tz) {
+    if (tz === 'UTC') return 0;
+    const s = Math.floor(t / 1000) * 1000;
+    const p = {};
+    zoneFormatter(tz).formatToParts(s).forEach((part) => { p[part.type] = part.value; });
+    const y = /^B/i.test(p.era || '') ? 1 - Number(p.year) : Number(p.year);
+    const wall = daysFromCivil(y, Number(p.month), Number(p.day)) * DAY +
+      (Number(p.hour) % 24) * 3600000 + Number(p.minute) * 60000 + Number(p.second) * 1000;
+    return wall - s;
+  }
+
+  function wallParts(t, tz) {
+    const off = offsetAt(t, tz);
+    const w = t + off;
+    const days = Math.floor(w / DAY);
+    const rest = w - days * DAY;
+    const c = civilFromDays(days);
+    return {
+      y: c.y, m: c.m, d: c.d, days, off,
+      h: Math.floor(rest / 3600000), mi: Math.floor(rest / 60000) % 60, s: Math.floor(rest / 1000) % 60, ms: rest % 1000
+    };
+  }
+
+  function fmtOffset(off) {
+    const a = Math.abs(Math.round(off / 1000));
+    const base = (off < 0 ? '-' : '+') + pad(Math.floor(a / 3600)) + ':' + pad(Math.floor(a / 60) % 60);
+    return a % 60 ? base + ':' + pad(a % 60) : base;
+  }
+
+  const fmtDate = (p) => fmtYear(p.y) + '-' + pad(p.m) + '-' + pad(p.d);
+  const fmtClock = (p) => pad(p.h) + ':' + pad(p.mi) + ':' + pad(p.s);
+  const fmtWall = (p, frac) => fmtDate(p) + ' ' + fmtClock(p) + (frac === '' ? '' : '.' + (frac || pad(p.ms, 3)));
+  const fmtIso = (p, frac, utcZ) => fmtDate(p) + 'T' + fmtClock(p) + '.' + (frac || pad(p.ms, 3)) + (utcZ ? 'Z' : fmtOffset(p.off));
+
+  function isoWeek(p) {
+    const wd = ((p.days % 7) + 7 + 3) % 7 + 1;
+    const thursday = p.days - wd + 4;
+    const ty = civilFromDays(thursday).y;
+    return fmtYear(ty) + '-W' + pad(Math.floor((thursday - daysFromCivil(ty, 1, 1)) / 7) + 1);
+  }
+
+  function relTime(t) {
+    const diff = (t - Date.now()) / 1000;
+    const abs = Math.abs(diff);
+    const unit = REL_UNITS.find(([, sec]) => abs >= sec) || REL_UNITS[REL_UNITS.length - 1];
+    return new Intl.RelativeTimeFormat(page.lang, { numeric: 'auto' }).format(Math.round(diff / unit[1]), unit[0]);
+  }
+
+  // ===== 状态与表格 =====
+  function setStatus(st) {
+    const s = st || { kind: 'idle', msg: tr('msg.idle') };
+    const badge = $('badge');
+    badge.className = 'badge ' + s.kind;
+    badge.textContent = tr('badge.' + s.kind);
+    const msg = $('msg');
+    msg.className = 'status-msg' + (s.kind === 'err' ? ' error' : s.note ? ' note' : '');
+    msg.textContent = s.msg;
+  }
+
+  function setInline(el, text, kind) {
+    el.hidden = !text;
+    el.className = 'ts-msg' + (kind ? ' ' + kind : '');
+    el.textContent = text || '';
+  }
+
+  function buildTable(table, keys) {
+    keys.forEach((key) => {
+      const row = table.insertRow();
+      const th = document.createElement('th');
+      th.dataset.i18n = 'row.' + key;
+      th.textContent = tr('row.' + key);
+      const td = row.insertCell();
+      const act = row.insertCell();
+      act.className = 'act';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.i18n = 'btn.copy';
+      btn.textContent = tr('btn.copy');
+      btn.addEventListener('click', () => page.copy(td.dataset.value || ''));
+      act.appendChild(btn);
+      row.prepend(th);
+      cells[key] = { td, btn };
+    });
+  }
+
+  function setCell(key, value) {
+    const c = cells[key];
+    c.td.dataset.value = value || '';
+    c.td.textContent = value || '—';
+    c.td.classList.toggle('empty', !value);
+    c.btn.disabled = !value;
+  }
+
+  const clearCells = (keys) => keys.forEach((k) => setCell(k, ''));
+
+  // ===== 时区选择 =====
+  function validZone(tz) {
+    try { zoneFormatter(tz); return true; } catch (e) { return false; }
+  }
+
+  function buildZones() {
+    const sel = $('tz');
+    sel.add(new Option('', 'local'));
+    sel.add(new Option('UTC', 'UTC'));
+    const used = new Set(['UTC']);
+    const group = (labelKey, list) => {
+      const g = document.createElement('optgroup');
+      g.dataset.i18nLabel = labelKey;
+      list.forEach((tz) => {
+        if (used.has(tz) || !validZone(tz)) return;
+        used.add(tz);
+        g.appendChild(new Option(tz, tz));
+      });
+      if (g.children.length) sel.appendChild(g);
+    };
+    group('tz.common', COMMON_ZONES);
+    if (typeof Intl.supportedValuesOf === 'function') group('tz.all', Intl.supportedValuesOf('timeZone'));
+    const saved = store.get();
+    if (saved && saved !== 'local' && !used.has(saved) && validZone(saved)) {
+      used.add(saved);
+      sel.add(new Option(saved, saved));
+    }
+    zoneChoice = saved && used.has(saved) ? saved : 'local';
+    sel.value = zoneChoice;
+  }
+
+  function labelZones() {
+    const sel = $('tz');
+    sel.options[0].text = tr('tz.local', LOCAL_ZONE);
+    sel.querySelectorAll('optgroup').forEach((g) => { g.label = tr(g.dataset.i18nLabel); });
+    sel.title = tr('tb.zone');
+  }
+
+  // ===== 当前时间 =====
+  function renderNow() {
+    const t = shownNow;
+    const p = wallParts(t, zone());
+    $('nowSec').textContent = String(Math.floor(t / 1000));
+    $('nowMs').textContent = String(t);
+    $('nowWall').textContent = fmtWall(p, '') + ' UTC' + fmtOffset(p.off);
+    $('nowZone').textContent = zone();
+    $('btnPause').textContent = tr(paused ? 'btn.resume' : 'btn.pause');
+    $('btnPause').setAttribute('aria-pressed', String(paused));
+    $('pausedTag').hidden = !paused;
+  }
+
+  function tick() {
+    const now = Date.now();
+    if (!paused) {
+      shownNow = now;
+      renderNow();
+    }
+    const sec = Math.floor(now / 1000);
+    if (sec !== lastSec) {
+      lastSec = sec;
+      if (tsState) setCell('rel', relTime(tsState.ms));
+    }
+  }
+
+  function copyNow(field) {
+    if (!paused) { shownNow = Date.now(); renderNow(); }
+    page.copy(field === 's' ? String(Math.floor(shownNow / 1000)) : String(shownNow));
+  }
+
+  // ===== 时间戳 → 日期 =====
+  function parseTimestamp(raw, unitSel) {
+    const s = raw.trim();
+    if (/^[+-]?\d{1,3}(?:[,_\s'’]\d{3})+(?:\.\d+)?$/.test(s) || /^[+-]?\d[\d,_\s]*(?:\.\d+)?$/.test(s) && /[,_\s]/.test(s)) {
+      return { error: tr('err.sep') };
+    }
+    const m = /^([+-])?(\d+)(?:\.(\d+))?$/.exec(s);
+    if (!m) return { error: tr('err.nan') };
+    const digits = m[2].replace(/^0+/, '').length || 1;
+    let unit = unitSel;
+    if (unit === 'auto') {
+      unit = digits <= 10 ? 's' : digits <= 13 ? 'ms' : digits <= 16 ? 'us' : digits <= 19 ? 'ns' : '';
+      if (!unit) return { error: tr('err.digits', digits) };
+    }
+    const frac = m[3] || '';
+    const fracDigits = UNIT_FRAC[unit];
+    let ns = BigInt(m[2]) * UNIT_NS[unit] + (fracDigits ? BigInt(frac.slice(0, fracDigits).padEnd(fracDigits, '0')) : 0n);
+    if (m[1] === '-') ns = -ns;
+    if (ns > MAX_NS || ns < -MAX_NS) return { error: tr('err.range') };
+    let msBig = ns / 1000000n;
+    if (ns % 1000000n < 0n) msBig -= 1n;
+    let inSec = ns % 1000000000n;
+    if (inSec < 0n) inSec += 1000000000n;
+    const shown = Math.min(9, Math.max(3, UNIT_BASE_DIGITS[unit] + frac.length));
+    return { ms: Number(msBig), frac: pad(inSec, 9).slice(0, shown), unit, auto: unitSel === 'auto', digits };
+  }
+
+  function runTs() {
+    const raw = $('tsInput').value;
+    tsState = null;
+    if (!raw.trim()) { clearCells(TS_ROWS); setInline($('tsMsg'), ''); return null; }
+    const r = parseTimestamp(raw, $('tsUnit').value);
+    if (r.error) { clearCells(TS_ROWS); setInline($('tsMsg'), r.error, 'error'); return { kind: 'err', msg: r.error }; }
+    tsState = r;
+    const tz = zone();
+    const p = wallParts(r.ms, tz);
+    const u = wallParts(r.ms, 'UTC');
+    const unitName = tr('unit.' + r.unit);
+    const zoned = fmtWall(p, r.frac) + ' UTC' + fmtOffset(p.off);
+    setInline($('tsMsg'), '');
+    setCell('unit', r.auto ? tr('val.auto', unitName, r.digits) : tr('val.manual', unitName));
+    setCell('zone', zoned);
+    setCell('utc', fmtWall(u, r.frac));
+    setCell('iso', fmtIso(p, r.frac, tz === 'UTC'));
+    setCell('rfc', new Date(r.ms).toUTCString());
+    setCell('rel', relTime(r.ms));
+    setCell('weekday', new Intl.DateTimeFormat(page.lang, { weekday: 'long', timeZone: tz }).format(r.ms));
+    setCell('week', isoWeek(p));
+    return { kind: 'ok', msg: tr('msg.ts', unitName, zoned) };
+  }
+
+  // ===== 日期 → 时间戳 =====
+  const DATE_RE = /^([+-]\d{6}|\d{4})([-/])(\d{1,2})\2(\d{1,2})(?:(?:[Tt]|\s+)(\d{1,2}):(\d{1,2})(?::(\d{1,2})(?:[.,](\d{1,9}))?)?\s*([Zz]|[+-]\d{2}(?::?\d{2})?)?)?$/;
+
+  function parseDate(raw) {
+    const m = DATE_RE.exec(raw.trim());
+    if (!m) return { error: tr('err.format') };
+    const y = Number(m[1]), mo = Number(m[3]), d = Number(m[4]);
+    const h = Number(m[5] || 0), mi = Number(m[6] || 0), s = Number(m[7] || 0);
+    if (m[1] === '-000000') return { error: tr('err.format') };
+    if (mo < 1 || mo > 12) return { error: tr('err.month', m[3]) };
+    if (d < 1 || d > monthDays(y, mo)) return { error: tr('err.day', m[4], y, mo, monthDays(y, mo)) };
+    if (h > 23) return { error: tr('err.hour', m[5]) };
+    if (mi > 59) return { error: tr('err.minute', m[6]) };
+    if (s > 59) return { error: tr('err.second', m[7]) };
+    const ms = Number((m[8] || '').slice(0, 3).padEnd(3, '0'));
+    const wall = daysFromCivil(y, mo, d) * DAY + h * 3600000 + mi * 60000 + s * 1000 + ms;
+    let offset = null;
+    if (m[9]) {
+      const om = /^([+-])(\d{2}):?(\d{2})?$/.exec(m[9]);
+      if (om) {
+        const oh = Number(om[2]), omin = Number(om[3] || 0);
+        if (oh > 23 || omin > 59) return { error: tr('err.offset', m[9]) };
+        offset = (om[1] === '-' ? -1 : 1) * (oh * 3600000 + omin * 60000);
+      } else {
+        offset = 0;
+      }
+    }
+    return { wall, offset, offsetText: m[9] ? (offset === 0 && /z/i.test(m[9]) ? 'Z' : fmtOffset(offset)) : '' };
+  }
+
+  const clampMs = (x) => Math.min(MAX_MS, Math.max(-MAX_MS, x));
+
+  // 本地墙上时间 → 时刻：用前后一天的偏移得到两个候选；都不成立说明落在夏令时缺口，取较晚的有效时刻
+  function wallToEpoch(wall, tz) {
+    const before = offsetAt(clampMs(wall - DAY), tz);
+    const after = offsetAt(clampMs(wall + DAY), tz);
+    const tA = wall - before, tB = wall - after;
+    const okA = offsetAt(clampMs(tA), tz) === before;
+    const okB = offsetAt(clampMs(tB), tz) === after;
+    if (okA && okB) return tA === tB ? { t: tA, kind: 'ok' } : { t: Math.min(tA, tB), kind: 'overlap' };
+    if (okA || okB) return { t: okA ? tA : tB, kind: 'ok' };
+    return { t: Math.max(tA, tB), kind: 'gap' };
+  }
+
+  function fmtSeconds(ms) {
+    const sign = ms < 0 ? '-' : '';
+    const a = Math.abs(ms);
+    const sec = Math.floor(a / 1000), rest = a % 1000;
+    return sign + sec + (rest ? '.' + pad(rest, 3) : '');
+  }
+
+  function runDate() {
+    const raw = $('dateInput').value;
+    const tz = zone();
+    dateState = null;
+    if (!raw.trim()) { clearCells(DATE_ROWS); setInline($('dateMsg'), tr('hint.formats')); return null; }
+    const r = parseDate(raw);
+    if (r.error) { clearCells(DATE_ROWS); setInline($('dateMsg'), r.error, 'error'); return { kind: 'err', msg: r.error }; }
+    let t, hint, note = false;
+    if (r.offset !== null) {
+      t = r.wall - r.offset;
+      hint = tr('hint.offset', r.offsetText);
+    } else {
+      const res = wallToEpoch(r.wall, tz);
+      t = res.t;
+      if (Math.abs(t) <= MAX_MS && res.kind !== 'ok') {
+        const p = wallParts(t, tz);
+        const shownIn = raw.trim().replace(/\s+/g, ' ');
+        hint = tr(res.kind === 'gap' ? 'note.gap' : 'note.overlap', shownIn, tz, fmtWall(p, '') + ' UTC' + fmtOffset(p.off));
+        note = true;
+      } else {
+        hint = tr('hint.zone', tz, 'UTC' + fmtOffset(offsetAt(clampMs(t), tz)));
+      }
+    }
+    if (!(Math.abs(t) <= MAX_MS)) {
+      clearCells(DATE_ROWS);
+      setInline($('dateMsg'), tr('err.range'), 'error');
+      return { kind: 'err', msg: tr('err.range') };
+    }
+    dateState = t;
+    setInline($('dateMsg'), hint, note ? 'note' : '');
+    setCell('sec', fmtSeconds(t));
+    setCell('ms', String(t));
+    setCell('isoUtc', fmtIso(wallParts(t, 'UTC'), '', true));
+    return { kind: 'ok', msg: note ? hint : tr('msg.date', fmtSeconds(t), String(t)), note };
+  }
+
+  // ===== 汇总渲染 =====
+  function renderAll() {
+    labelZones();
+    renderNow();
+    const a = runTs();
+    const b = runDate();
+    setStatus(active === 'ts' ? a : active === 'date' ? b : null);
+  }
+
+  function activate(which) {
+    active = which;
+    renderAll();
+  }
+
+  function fillTsNow() {
+    const unit = $('tsUnit').value;
+    const ms = BigInt(Date.now());
+    const v = { auto: ms / 1000n, s: ms / 1000n, ms, us: ms * 1000n, ns: ms * 1000000n }[unit];
+    $('tsInput').value = String(v);
+    activate('ts');
+  }
+
+  function fillDateNow() {
+    const p = wallParts(Date.now(), zone());
+    $('dateInput').value = fmtWall(p, '');
+    activate('date');
+  }
+
+  buildZones();
+  buildTable($('tsTable'), TS_ROWS);
+  buildTable($('dateTable'), DATE_ROWS);
+
+  $('tz').addEventListener('change', () => {
+    zoneChoice = $('tz').value;
+    store.set(zoneChoice);
+    renderAll();
+  });
+  $('tsInput').addEventListener('input', () => activate('ts'));
+  $('tsUnit').addEventListener('change', () => activate('ts'));
+  $('dateInput').addEventListener('input', () => activate('date'));
+  $('btnTsNow').addEventListener('click', fillTsNow);
+  $('btnDateNow').addEventListener('click', fillDateNow);
+  $('btnCopySec').addEventListener('click', () => copyNow('s'));
+  $('btnCopyMs').addEventListener('click', () => copyNow('ms'));
+  $('btnPause').addEventListener('click', () => {
+    paused = !paused;
+    shownNow = Date.now();
+    renderNow();
+  });
+
+  renderAll();
+  setInterval(tick, 100);
+})();
+</script>
+</body>
+</html>

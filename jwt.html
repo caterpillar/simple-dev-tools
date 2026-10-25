@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JWT 解析</title>
+<meta name="description" content="本地离线 JWT 解析：查看头部与载荷、过期状态与时间字段，并用 WebCrypto 验证 HS / RS / PS / ES 签名。">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="toolbox.css">
+<script src="toolbox-nav.js"></script>
+<style>
+  #tokenBody { overflow: hidden; }
+  .pane-head.sub { border-top: 1px solid var(--border); }
+  .verify { flex: 0 0 auto; display: flex; flex-direction: column; background: var(--bg); }
+  .verify textarea.code { height: 140px; border-bottom: 1px solid var(--border); }
+  .verify-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px; }
+  .verify-row label.chk { font-size: var(--chk-fs); }
+  .verify-row button { height: var(--ctl-h); font-size: var(--ctl-fs); padding: 0 var(--ctl-px); border-radius: var(--ctl-r); line-height: 1.2; margin-left: auto; }
+  .v-result { flex: 1 1 100%; display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 12.5px; color: var(--muted); }
+  .v-result .badge { flex: 0 0 auto; }
+  .v-msg { min-width: 0; overflow-wrap: anywhere; }
+  .result { padding-bottom: 14px; }
+  .empty-hint { margin: 0; padding: 14px 12px; color: var(--placeholder); font-size: 13px; }
+  .note { margin: 12px 12px 2px; padding: 7px 10px; border-radius: 6px; font-size: 12.5px; overflow-wrap: anywhere;
+    color: var(--text); background: color-mix(in srgb, var(--warn) 10%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 34%, transparent); }
+  .note.err { background: color-mix(in srgb, var(--err) 10%, transparent); border-color: color-mix(in srgb, var(--err) 34%, transparent); }
+  .sec h3 { display: flex; align-items: baseline; gap: 10px; margin: 0; padding: 12px 12px 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+  .sec h3 .meta { font-weight: 400; font-family: var(--mono); font-size: 11.5px; }
+  .sec .code-out { height: auto; padding: 4px 12px 6px; overflow: visible; }
+  .sec .kv th { font-family: var(--mono); color: var(--key); }
+  .sec .kv td.desc { width: 1%; white-space: nowrap; font-family: inherit; font-size: 12.5px; color: var(--muted); }
+  .kv .rel { margin-left: 10px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--muted); }
+  .kv .badge { margin-left: 10px; vertical-align: 1px; }
+  .kv .bad { color: var(--err); }
+  @media (max-width: 900px) {
+    .verify textarea.code { height: 72px; }
+  }
+</style>
+</head>
+<body>
+<header class="titlebar">
+  <nav class="tool-tabs" id="toolTabs" data-current="jwt"></nav>
+  <div class="titlebar-right" id="toolboxControls"></div>
+</header>
+
+<div class="toolbar">
+  <button type="button" id="btnSample" data-i18n="btn.sample" data-i18n-title="tip.sample">示例</button>
+  <button type="button" id="btnClear" data-i18n="btn.clear" data-i18n-title="tip.clear">清空</button>
+  <span class="tb-sep"></span>
+  <button type="button" id="btnCopyHeader" data-i18n="btn.copyHeader" data-i18n-title="tip.copyHeader">复制头部</button>
+  <button type="button" id="btnCopyPayload" data-i18n="btn.copyPayload" data-i18n-title="tip.copyPayload">复制载荷</button>
+</div>
+
+<main class="workspace">
+  <section class="pane">
+    <div class="pane-head"><span data-i18n="pane.token">令牌</span><span class="meta" id="tokenMeta"></span></div>
+    <div class="pane-body" id="tokenBody">
+      <textarea class="code" id="token" spellcheck="false" autocomplete="off" data-i18n-ph="ph.token" data-i18n-aria="pane.token"></textarea>
+    </div>
+    <div class="pane-head sub"><span data-i18n="pane.verify">验证签名</span><span class="meta" id="algMeta"></span></div>
+    <div class="verify">
+      <textarea class="code" id="key" spellcheck="false" autocomplete="off" data-i18n-aria="aria.key"></textarea>
+      <div class="verify-row">
+        <label class="chk" id="b64Wrap" data-i18n-title="tip.b64"><input type="checkbox" id="optB64"><span data-i18n="opt.b64">密钥是 Base64 编码</span></label>
+        <button type="button" class="primary" id="btnVerify" data-i18n="btn.verify" data-i18n-title="tip.verify">验证</button>
+        <div class="v-result" id="vResult" hidden><span class="badge" id="vBadge"></span><span class="v-msg" id="vMsg"></span></div>
+      </div>
+    </div>
+  </section>
+  <section class="pane">
+    <div class="pane-head"><span data-i18n="pane.result">解析结果</span><span class="meta" id="outMeta"></span></div>
+    <div class="pane-body result" id="out"></div>
+  </section>
+</main>
+
+<footer class="status">
+  <span class="badge idle" id="badge"></span>
+  <span class="status-msg" id="msg"></span>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  const TEXT = {
+    'zh-CN': {
+      'btn.copyHeader': '复制头部', 'btn.copyPayload': '复制载荷', 'btn.verify': '验证',
+      'tip.sample': '载入 HS256 示例令牌，并填入它的密钥 your-256-bit-secret', 'tip.clear': '清空令牌和密钥',
+      'tip.copyHeader': '复制格式化的头部 JSON', 'tip.copyPayload': '复制格式化的载荷 JSON', 'tip.verify': '用上方密钥验证签名（Ctrl/⌘ + Enter）',
+      'pane.token': '令牌', 'pane.verify': '验证签名', 'pane.result': '解析结果',
+      'ph.token': '粘贴 JWT，可带 Bearer 前缀，空格和换行会自动忽略…',
+      'ph.keyHS': '输入 {0} 密钥（secret）…', 'ph.keyAsym': '粘贴 {0} 公钥：PEM（-----BEGIN PUBLIC KEY-----）或 JWK JSON…',
+      'ph.keyNone': '此令牌未签名（alg: none），无需密钥', 'ph.keyWait': '先在上方输入令牌，再在这里填写验证用的密钥…',
+      'ph.keyJwe': 'JWE 是加密令牌，不能在这里验证签名',
+      'opt.b64': '密钥是 Base64 编码', 'tip.b64': '先把密钥按 Base64 / Base64URL 解码，再作为 HMAC 密钥使用', 'aria.key': '验证密钥',
+      'meta.chars': '{0} 字符', 'meta.bearer': '已去掉 Bearer 前缀',
+      'sec.header': '头部', 'sec.payload': '载荷', 'sec.times': '时间字段', 'sec.claims': '标准声明', 'sec.signature': '签名', 'sec.bytes': '{0} 字节',
+      'empty.result': '在左侧粘贴 JWT，这里会显示头部、载荷、时间字段和签名。全部在本地解析，令牌不会离开本页面。',
+      'note.text': '载荷不是 JSON，已按文本显示',
+      'note.jwe': '这是 JWE 加密令牌（5 段）：载荷已加密，无法显示，下面只列出受保护的头部。',
+      'note.none': '此令牌未签名（alg: none），任何人都能伪造，不应信任其内容。',
+      'sig.empty': '（无签名）', 'time.bad': '不是有效的数字时间戳',
+      'claim.iss': '签发者', 'claim.sub': '主体', 'claim.aud': '受众', 'claim.exp': '过期时间', 'claim.nbf': '生效时间',
+      'claim.iat': '签发时间', 'claim.jti': '令牌 ID', 'claim.auth_time': '认证时间',
+      'badge.idle': '待输入', 'badge.valid': '有效', 'badge.expired': '已过期', 'badge.nbf': '尚未生效', 'badge.bad': '格式错误', 'badge.jwe': '已加密',
+      'msg.expires': '{0}过期', 'msg.expired': '已于{0}过期', 'msg.nbf': '{0}生效', 'msg.noExp': '没有过期时间', 'msg.unsigned': '未签名', 'msg.encrypted': '载荷已加密',
+      'seg.header': '头部', 'seg.payload': '载荷', 'seg.signature': '签名',
+      'err.segments': 'JWT 应由 . 分隔为 3 段（JWE 为 5 段），当前是 {0} 段', 'err.empty': '{0}：内容为空',
+      'err.badChar': '{0}：第 {2} 个字符 {1} 不是合法的 Base64URL 字符（只允许 A–Z a–z 0–9 - _）',
+      'err.badLen': '{0}：长度不正确，不是有效的 Base64URL', 'err.utf8': '{0}：解码后不是有效的 UTF-8 文本',
+      'err.json': '{0}：不是有效的 JSON（{1}）', 'err.notObject': '{0}：必须是 JSON 对象',
+      'v.ok': '签名有效', 'v.bad': '签名无效', 'v.na': '无法验证',
+      'v.okMsg': '签名与密钥匹配（{0}）', 'v.badMsg': '签名与密钥不匹配，或令牌内容被改动过',
+      'vr.noToken': '请先输入格式正确的令牌', 'vr.noKey': '请输入密钥', 'vr.none': '令牌未签名（alg: none），没有可验证的签名',
+      'vr.jwe': 'JWE 是加密令牌，没有可验证的签名', 'vr.noAlg': '头部缺少 alg 字段', 'vr.unsupported': '不支持的算法：{0}',
+      'vr.noSubtle': '当前浏览器不提供 WebCrypto（crypto.subtle），无法验证', 'vr.badKey': '密钥无法导入：格式不正确，或与 {0} 不匹配',
+      'vr.badB64': '密钥不是有效的 Base64', 'vr.private': '这是私钥，请改为粘贴对应的公钥（-----BEGIN PUBLIC KEY-----）',
+      'vr.pemType': '不支持 {0} 格式，请使用 -----BEGIN PUBLIC KEY-----（SPKI）公钥', 'vr.keyFormat': '请粘贴 PEM 公钥或 JWK JSON',
+      'vr.badJson': '密钥看起来是 JWK，但不是有效的 JSON', 'vr.noJwk': 'JWK 集合中没有与 kid 匹配的密钥'
+    },
+    'zh-TW': {
+      'btn.copyHeader': '複製標頭', 'btn.copyPayload': '複製酬載', 'btn.verify': '驗證',
+      'tip.sample': '載入 HS256 範例權杖，並填入它的金鑰 your-256-bit-secret', 'tip.clear': '清空權杖與金鑰',
+      'tip.copyHeader': '複製格式化的標頭 JSON', 'tip.copyPayload': '複製格式化的酬載 JSON', 'tip.verify': '用上方金鑰驗證簽章（Ctrl/⌘ + Enter）',
+      'pane.token': '權杖', 'pane.verify': '驗證簽章', 'pane.result': '解析結果',
+      'ph.token': '貼上 JWT，可帶 Bearer 前綴，空白與換行會自動忽略…',
+      'ph.keyHS': '輸入 {0} 金鑰（secret）…', 'ph.keyAsym': '貼上 {0} 公鑰：PEM（-----BEGIN PUBLIC KEY-----）或 JWK JSON…',
+      'ph.keyNone': '此權杖未簽章（alg: none），不需要金鑰', 'ph.keyWait': '先在上方輸入權杖，再在這裡填寫驗證用的金鑰…',
+      'ph.keyJwe': 'JWE 是加密權杖，無法在這裡驗證簽章',
+      'opt.b64': '金鑰為 Base64 編碼', 'tip.b64': '先將金鑰以 Base64 / Base64URL 解碼，再作為 HMAC 金鑰使用', 'aria.key': '驗證金鑰',
+      'meta.chars': '{0} 字元', 'meta.bearer': '已移除 Bearer 前綴',
+      'sec.header': '標頭', 'sec.payload': '酬載', 'sec.times': '時間欄位', 'sec.claims': '標準聲明', 'sec.signature': '簽章', 'sec.bytes': '{0} 位元組',
+      'empty.result': '在左側貼上 JWT，這裡會顯示標頭、酬載、時間欄位與簽章。全部在本機解析，權杖不會離開本頁面。',
+      'note.text': '酬載不是 JSON，已以文字顯示',
+      'note.jwe': '這是 JWE 加密權杖（5 段）：酬載已加密，無法顯示，下方只列出受保護的標頭。',
+      'note.none': '此權杖未簽章（alg: none），任何人都能偽造，不應信任其內容。',
+      'sig.empty': '（無簽章）', 'time.bad': '不是有效的數字時間戳',
+      'claim.iss': '簽發者', 'claim.sub': '主體', 'claim.aud': '受眾', 'claim.exp': '到期時間', 'claim.nbf': '生效時間',
+      'claim.iat': '簽發時間', 'claim.jti': '權杖 ID', 'claim.auth_time': '認證時間',
+      'badge.idle': '待輸入', 'badge.valid': '有效', 'badge.expired': '已過期', 'badge.nbf': '尚未生效', 'badge.bad': '格式錯誤', 'badge.jwe': '已加密',
+      'msg.expires': '{0}到期', 'msg.expired': '已於{0}到期', 'msg.nbf': '{0}生效', 'msg.noExp': '沒有到期時間', 'msg.unsigned': '未簽章', 'msg.encrypted': '酬載已加密',
+      'seg.header': '標頭', 'seg.payload': '酬載', 'seg.signature': '簽章',
+      'err.segments': 'JWT 應以 . 分隔為 3 段（JWE 為 5 段），目前是 {0} 段', 'err.empty': '{0}：內容為空',
+      'err.badChar': '{0}：第 {2} 個字元 {1} 不是合法的 Base64URL 字元（只允許 A–Z a–z 0–9 - _）',
+      'err.badLen': '{0}：長度不正確，不是有效的 Base64URL', 'err.utf8': '{0}：解碼後不是有效的 UTF-8 文字',
+      'err.json': '{0}：不是有效的 JSON（{1}）', 'err.notObject': '{0}：必須是 JSON 物件',
+      'v.ok': '簽章有效', 'v.bad': '簽章無效', 'v.na': '無法驗證',
+      'v.okMsg': '簽章與金鑰相符（{0}）', 'v.badMsg': '簽章與金鑰不符，或權杖內容遭到修改',
+      'vr.noToken': '請先輸入格式正確的權杖', 'vr.noKey': '請輸入金鑰', 'vr.none': '權杖未簽章（alg: none），沒有可驗證的簽章',
+      'vr.jwe': 'JWE 是加密權杖，沒有可驗證的簽章', 'vr.noAlg': '標頭缺少 alg 欄位', 'vr.unsupported': '不支援的演算法：{0}',
+      'vr.noSubtle': '目前瀏覽器不提供 WebCrypto（crypto.subtle），無法驗證', 'vr.badKey': '金鑰無法匯入：格式不正確，或與 {0} 不相符',
+      'vr.badB64': '金鑰不是有效的 Base64', 'vr.private': '這是私鑰，請改為貼上對應的公鑰（-----BEGIN PUBLIC KEY-----）',
+      'vr.pemType': '不支援 {0} 格式，請使用 -----BEGIN PUBLIC KEY-----（SPKI）公鑰', 'vr.keyFormat': '請貼上 PEM 公鑰或 JWK JSON',
+      'vr.badJson': '金鑰看起來是 JWK，但不是有效的 JSON', 'vr.noJwk': 'JWK 集合中沒有與 kid 相符的金鑰'
+    },
+    en: {
+      'btn.copyHeader': 'Copy header', 'btn.copyPayload': 'Copy payload', 'btn.verify': 'Verify',
+      'tip.sample': 'Load an HS256 sample token and its secret your-256-bit-secret', 'tip.clear': 'Clear the token and key',
+      'tip.copyHeader': 'Copy the header as formatted JSON', 'tip.copyPayload': 'Copy the payload as formatted JSON', 'tip.verify': 'Verify the signature with the key above (Ctrl/⌘ + Enter)',
+      'pane.token': 'Token', 'pane.verify': 'Verify signature', 'pane.result': 'Decoded',
+      'ph.token': 'Paste a JWT — a Bearer prefix, spaces and line breaks are ignored…',
+      'ph.keyHS': 'Enter the {0} secret…', 'ph.keyAsym': 'Paste the {0} public key: PEM (-----BEGIN PUBLIC KEY-----) or JWK JSON…',
+      'ph.keyNone': 'This token is unsigned (alg: none); no key needed', 'ph.keyWait': 'Enter a token above, then the key to verify it with…',
+      'ph.keyJwe': 'JWE tokens are encrypted; signatures cannot be verified here',
+      'opt.b64': 'Secret is Base64-encoded', 'tip.b64': 'Base64 / Base64URL-decode the secret before using it as the HMAC key', 'aria.key': 'Verification key',
+      'meta.chars': '{0} chars', 'meta.bearer': 'Bearer prefix removed',
+      'sec.header': 'Header', 'sec.payload': 'Payload', 'sec.times': 'Time claims', 'sec.claims': 'Registered claims', 'sec.signature': 'Signature', 'sec.bytes': '{0} bytes',
+      'empty.result': 'Paste a JWT on the left to see its header, payload, time claims and signature. Everything is decoded locally — the token never leaves this page.',
+      'note.text': 'The payload is not JSON; shown as text',
+      'note.jwe': 'This is an encrypted JWE token (5 parts): the payload is encrypted and cannot be shown. Only the protected header is listed below.',
+      'note.none': 'This token is unsigned (alg: none). Anyone can forge it, so do not trust its contents.',
+      'sig.empty': '(no signature)', 'time.bad': 'Not a valid numeric timestamp',
+      'claim.iss': 'Issuer', 'claim.sub': 'Subject', 'claim.aud': 'Audience', 'claim.exp': 'Expiration', 'claim.nbf': 'Not before',
+      'claim.iat': 'Issued at', 'claim.jti': 'Token ID', 'claim.auth_time': 'Auth time',
+      'badge.idle': 'Waiting', 'badge.valid': 'Valid', 'badge.expired': 'Expired', 'badge.nbf': 'Not yet valid', 'badge.bad': 'Malformed', 'badge.jwe': 'Encrypted',
+      'msg.expires': 'Expires {0}', 'msg.expired': 'Expired {0}', 'msg.nbf': 'Becomes valid {0}', 'msg.noExp': 'No expiry', 'msg.unsigned': 'Unsigned', 'msg.encrypted': 'Payload encrypted',
+      'seg.header': 'Header', 'seg.payload': 'Payload', 'seg.signature': 'Signature',
+      'err.segments': 'A JWT has 3 parts separated by dots (a JWE has 5); found {0}', 'err.empty': '{0}: empty',
+      'err.badChar': '{0}: character {2} ({1}) is not valid Base64URL (only A–Z a–z 0–9 - _)',
+      'err.badLen': '{0}: invalid length for Base64URL', 'err.utf8': '{0}: decoded bytes are not valid UTF-8 text',
+      'err.json': '{0}: not valid JSON ({1})', 'err.notObject': '{0}: must be a JSON object',
+      'v.ok': 'Signature valid', 'v.bad': 'Signature invalid', 'v.na': 'Cannot verify',
+      'v.okMsg': 'The signature matches the key ({0})', 'v.badMsg': 'The signature does not match the key, or the token was modified',
+      'vr.noToken': 'Enter a well-formed token first', 'vr.noKey': 'Enter a key', 'vr.none': 'The token is unsigned (alg: none); there is no signature to verify',
+      'vr.jwe': 'JWE tokens are encrypted and carry no signature to verify', 'vr.noAlg': 'The header has no alg', 'vr.unsupported': 'Unsupported algorithm: {0}',
+      'vr.noSubtle': 'WebCrypto (crypto.subtle) is not available in this browser', 'vr.badKey': 'Could not import the key: invalid format, or it does not match {0}',
+      'vr.badB64': 'The secret is not valid Base64', 'vr.private': 'This is a private key — paste the matching public key (-----BEGIN PUBLIC KEY-----) instead',
+      'vr.pemType': '{0} is not supported — use a -----BEGIN PUBLIC KEY----- (SPKI) public key', 'vr.keyFormat': 'Paste a PEM public key or a JWK JSON object',
+      'vr.badJson': 'The key looks like JWK but is not valid JSON', 'vr.noJwk': 'No key in the JWK set matches the kid'
+    },
+    ja: {
+      'btn.copyHeader': 'ヘッダーをコピー', 'btn.copyPayload': 'ペイロードをコピー', 'btn.verify': '検証',
+      'tip.sample': 'HS256 のサンプルトークンとシークレット your-256-bit-secret を読み込む', 'tip.clear': 'トークンと鍵をクリア',
+      'tip.copyHeader': '整形したヘッダー JSON をコピー', 'tip.copyPayload': '整形したペイロード JSON をコピー', 'tip.verify': '上の鍵で署名を検証（Ctrl/⌘ + Enter）',
+      'pane.token': 'トークン', 'pane.verify': '署名の検証', 'pane.result': '解析結果',
+      'ph.token': 'JWT を貼り付け（Bearer 付きも可。空白と改行は無視されます）…',
+      'ph.keyHS': '{0} のシークレットを入力…', 'ph.keyAsym': '{0} の公開鍵を貼り付け：PEM（-----BEGIN PUBLIC KEY-----）または JWK JSON…',
+      'ph.keyNone': 'このトークンは署名なし（alg: none）のため鍵は不要です', 'ph.keyWait': '上にトークンを入力してから、検証用の鍵をここに入力…',
+      'ph.keyJwe': 'JWE は暗号化トークンのため、ここでは署名を検証できません',
+      'opt.b64': 'シークレットは Base64', 'tip.b64': 'シークレットを Base64 / Base64URL デコードしてから HMAC 鍵として使います', 'aria.key': '検証用の鍵',
+      'meta.chars': '{0} 文字', 'meta.bearer': 'Bearer を除去',
+      'sec.header': 'ヘッダー', 'sec.payload': 'ペイロード', 'sec.times': '時刻クレーム', 'sec.claims': '登録済みクレーム', 'sec.signature': '署名', 'sec.bytes': '{0} バイト',
+      'empty.result': '左に JWT を貼り付けると、ヘッダー・ペイロード・時刻クレーム・署名を表示します。解析はすべてローカルで行われ、トークンがこのページの外に出ることはありません。',
+      'note.text': 'ペイロードは JSON ではないため、テキストとして表示しています',
+      'note.jwe': 'これは JWE 暗号化トークン（5 パート）です。ペイロードは暗号化されていて表示できません。以下は保護ヘッダーのみです。',
+      'note.none': 'このトークンは署名なし（alg: none）です。誰でも偽造できるため、内容を信頼しないでください。',
+      'sig.empty': '（署名なし）', 'time.bad': '数値のタイムスタンプではありません',
+      'claim.iss': '発行者', 'claim.sub': '主体', 'claim.aud': '対象者', 'claim.exp': '有効期限', 'claim.nbf': '有効開始',
+      'claim.iat': '発行日時', 'claim.jti': 'トークン ID', 'claim.auth_time': '認証日時',
+      'badge.idle': '入力待ち', 'badge.valid': '有効', 'badge.expired': '期限切れ', 'badge.nbf': '有効期間前', 'badge.bad': '形式エラー', 'badge.jwe': '暗号化',
+      'msg.expires': '有効期限：{0}', 'msg.expired': '期限切れ：{0}', 'msg.nbf': '有効開始：{0}', 'msg.noExp': '有効期限なし', 'msg.unsigned': '署名なし', 'msg.encrypted': 'ペイロードは暗号化済み',
+      'seg.header': 'ヘッダー', 'seg.payload': 'ペイロード', 'seg.signature': '署名',
+      'err.segments': 'JWT は . で区切られた 3 パート（JWE は 5 パート）ですが、{0} パートあります', 'err.empty': '{0}：空です',
+      'err.badChar': '{0}：{2} 文字目の {1} は Base64URL として無効です（使えるのは A–Z a–z 0–9 - _）',
+      'err.badLen': '{0}：Base64URL として長さが不正です', 'err.utf8': '{0}：デコード結果が有効な UTF-8 テキストではありません',
+      'err.json': '{0}：有効な JSON ではありません（{1}）', 'err.notObject': '{0}：JSON オブジェクトである必要があります',
+      'v.ok': '署名は有効', 'v.bad': '署名は無効', 'v.na': '検証できません',
+      'v.okMsg': '署名は鍵と一致しました（{0}）', 'v.badMsg': '署名が鍵と一致しないか、トークンが改ざんされています',
+      'vr.noToken': 'まず正しい形式のトークンを入力してください', 'vr.noKey': '鍵を入力してください', 'vr.none': '署名なし（alg: none）のため、検証する署名がありません',
+      'vr.jwe': 'JWE は暗号化トークンで、検証する署名がありません', 'vr.noAlg': 'ヘッダーに alg がありません', 'vr.unsupported': '未対応のアルゴリズム：{0}',
+      'vr.noSubtle': 'このブラウザでは WebCrypto（crypto.subtle）を利用できません', 'vr.badKey': '鍵を読み込めません：形式が不正か、{0} 用の鍵ではありません',
+      'vr.badB64': 'シークレットが有効な Base64 ではありません', 'vr.private': 'これは秘密鍵です。対応する公開鍵（-----BEGIN PUBLIC KEY-----）を貼り付けてください',
+      'vr.pemType': '{0} 形式には未対応です。-----BEGIN PUBLIC KEY-----（SPKI）の公開鍵を使ってください', 'vr.keyFormat': 'PEM 公開鍵または JWK JSON を貼り付けてください',
+      'vr.badJson': 'JWK のようですが、有効な JSON ではありません', 'vr.noJwk': 'JWK セットに kid が一致する鍵がありません'
+    },
+    ko: {
+      'btn.copyHeader': '헤더 복사', 'btn.copyPayload': '페이로드 복사', 'btn.verify': '검증',
+      'tip.sample': 'HS256 예시 토큰과 시크릿 your-256-bit-secret 불러오기', 'tip.clear': '토큰과 키 지우기',
+      'tip.copyHeader': '정렬된 헤더 JSON 복사', 'tip.copyPayload': '정렬된 페이로드 JSON 복사', 'tip.verify': '위의 키로 서명 검증 (Ctrl/⌘ + Enter)',
+      'pane.token': '토큰', 'pane.verify': '서명 검증', 'pane.result': '해석 결과',
+      'ph.token': 'JWT 를 붙여 넣으세요. Bearer 접두사, 공백, 줄바꿈은 무시됩니다…',
+      'ph.keyHS': '{0} 시크릿을 입력하세요…', 'ph.keyAsym': '{0} 공개 키를 붙여 넣으세요: PEM(-----BEGIN PUBLIC KEY-----) 또는 JWK JSON…',
+      'ph.keyNone': '서명되지 않은 토큰(alg: none)이라 키가 필요 없습니다', 'ph.keyWait': '위에 토큰을 입력한 뒤 검증할 키를 여기에 입력하세요…',
+      'ph.keyJwe': 'JWE 는 암호화된 토큰이라 여기서 서명을 검증할 수 없습니다',
+      'opt.b64': '시크릿이 Base64', 'tip.b64': '시크릿을 Base64 / Base64URL 로 디코딩한 뒤 HMAC 키로 사용합니다', 'aria.key': '검증 키',
+      'meta.chars': '{0}자', 'meta.bearer': 'Bearer 접두사 제거됨',
+      'sec.header': '헤더', 'sec.payload': '페이로드', 'sec.times': '시간 클레임', 'sec.claims': '등록된 클레임', 'sec.signature': '서명', 'sec.bytes': '{0}바이트',
+      'empty.result': '왼쪽에 JWT 를 붙여 넣으면 헤더, 페이로드, 시간 클레임, 서명이 여기에 표시됩니다. 모든 해석은 로컬에서 이루어지며 토큰은 이 페이지 밖으로 나가지 않습니다.',
+      'note.text': '페이로드가 JSON 이 아니어서 텍스트로 표시합니다',
+      'note.jwe': 'JWE 암호화 토큰(5개 부분)입니다. 페이로드는 암호화되어 표시할 수 없으며, 아래에는 보호된 헤더만 표시합니다.',
+      'note.none': '서명되지 않은 토큰(alg: none)입니다. 누구나 위조할 수 있으므로 내용을 신뢰하면 안 됩니다.',
+      'sig.empty': '(서명 없음)', 'time.bad': '올바른 숫자 타임스탬프가 아닙니다',
+      'claim.iss': '발급자', 'claim.sub': '주체', 'claim.aud': '대상', 'claim.exp': '만료 시간', 'claim.nbf': '유효 시작',
+      'claim.iat': '발급 시간', 'claim.jti': '토큰 ID', 'claim.auth_time': '인증 시간',
+      'badge.idle': '입력 대기', 'badge.valid': '유효', 'badge.expired': '만료됨', 'badge.nbf': '아직 유효하지 않음', 'badge.bad': '형식 오류', 'badge.jwe': '암호화됨',
+      'msg.expires': '만료: {0}', 'msg.expired': '만료됨: {0}', 'msg.nbf': '유효 시작: {0}', 'msg.noExp': '만료 시간 없음', 'msg.unsigned': '서명 없음', 'msg.encrypted': '페이로드 암호화됨',
+      'seg.header': '헤더', 'seg.payload': '페이로드', 'seg.signature': '서명',
+      'err.segments': 'JWT 는 . 으로 구분된 3개 부분(JWE 는 5개)이어야 하지만 {0}개입니다', 'err.empty': '{0}: 비어 있습니다',
+      'err.badChar': '{0}: {2}번째 문자 {1} 은(는) 올바른 Base64URL 문자가 아닙니다 (A–Z a–z 0–9 - _ 만 허용)',
+      'err.badLen': '{0}: Base64URL 길이가 올바르지 않습니다', 'err.utf8': '{0}: 디코딩 결과가 올바른 UTF-8 텍스트가 아닙니다',
+      'err.json': '{0}: 올바른 JSON 이 아닙니다 ({1})', 'err.notObject': '{0}: JSON 객체여야 합니다',
+      'v.ok': '서명 유효', 'v.bad': '서명 무효', 'v.na': '검증 불가',
+      'v.okMsg': '서명이 키와 일치합니다 ({0})', 'v.badMsg': '서명이 키와 일치하지 않거나 토큰이 변조되었습니다',
+      'vr.noToken': '먼저 올바른 형식의 토큰을 입력하세요', 'vr.noKey': '키를 입력하세요', 'vr.none': '서명되지 않은 토큰(alg: none)이라 검증할 서명이 없습니다',
+      'vr.jwe': 'JWE 는 암호화된 토큰이라 검증할 서명이 없습니다', 'vr.noAlg': '헤더에 alg 가 없습니다', 'vr.unsupported': '지원하지 않는 알고리즘: {0}',
+      'vr.noSubtle': '이 브라우저는 WebCrypto(crypto.subtle)를 제공하지 않아 검증할 수 없습니다', 'vr.badKey': '키를 가져올 수 없습니다: 형식이 잘못되었거나 {0} 용 키가 아닙니다',
+      'vr.badB64': '시크릿이 올바른 Base64 가 아닙니다', 'vr.private': '개인 키입니다. 대응하는 공개 키(-----BEGIN PUBLIC KEY-----)를 붙여 넣으세요',
+      'vr.pemType': '{0} 형식은 지원하지 않습니다. -----BEGIN PUBLIC KEY-----(SPKI) 공개 키를 사용하세요', 'vr.keyFormat': 'PEM 공개 키 또는 JWK JSON 을 붙여 넣으세요',
+      'vr.badJson': 'JWK 처럼 보이지만 올바른 JSON 이 아닙니다', 'vr.noJwk': 'JWK 세트에 kid 가 일치하는 키가 없습니다'
+    },
+    es: {
+      'btn.copyHeader': 'Copiar cabecera', 'btn.copyPayload': 'Copiar payload', 'btn.verify': 'Verificar',
+      'tip.sample': 'Carga un token HS256 de ejemplo y su secreto your-256-bit-secret', 'tip.clear': 'Vacía el token y la clave',
+      'tip.copyHeader': 'Copia la cabecera como JSON formateado', 'tip.copyPayload': 'Copia el payload como JSON formateado', 'tip.verify': 'Verifica la firma con la clave de arriba (Ctrl/⌘ + Enter)',
+      'pane.token': 'Token', 'pane.verify': 'Verificar firma', 'pane.result': 'Resultado',
+      'ph.token': 'Pega un JWT; se ignoran el prefijo Bearer, los espacios y los saltos de línea…',
+      'ph.keyHS': 'Introduce el secreto {0}…', 'ph.keyAsym': 'Pega la clave pública {0}: PEM (-----BEGIN PUBLIC KEY-----) o JWK JSON…',
+      'ph.keyNone': 'Este token no está firmado (alg: none); no hace falta clave', 'ph.keyWait': 'Introduce un token arriba y luego aquí la clave para verificarlo…',
+      'ph.keyJwe': 'Los tokens JWE están cifrados; aquí no se puede verificar su firma',
+      'opt.b64': 'Secreto en Base64', 'tip.b64': 'Decodifica el secreto como Base64 / Base64URL antes de usarlo como clave HMAC', 'aria.key': 'Clave de verificación',
+      'meta.chars': '{0} caracteres', 'meta.bearer': 'Prefijo Bearer eliminado',
+      'sec.header': 'Cabecera', 'sec.payload': 'Payload', 'sec.times': 'Fechas', 'sec.claims': 'Claims registrados', 'sec.signature': 'Firma', 'sec.bytes': '{0} bytes',
+      'empty.result': 'Pega un JWT a la izquierda para ver su cabecera, payload, fechas y firma. Todo se decodifica localmente: el token nunca sale de esta página.',
+      'note.text': 'El payload no es JSON; se muestra como texto',
+      'note.jwe': 'Es un token JWE cifrado (5 partes): el payload está cifrado y no se puede mostrar. Abajo solo aparece la cabecera protegida.',
+      'note.none': 'Este token no está firmado (alg: none). Cualquiera puede falsificarlo, así que no confíes en su contenido.',
+      'sig.empty': '(sin firma)', 'time.bad': 'No es una marca de tiempo numérica válida',
+      'claim.iss': 'Emisor', 'claim.sub': 'Sujeto', 'claim.aud': 'Audiencia', 'claim.exp': 'Caducidad', 'claim.nbf': 'Válido desde',
+      'claim.iat': 'Emitido', 'claim.jti': 'ID del token', 'claim.auth_time': 'Autenticación',
+      'badge.idle': 'En espera', 'badge.valid': 'Válido', 'badge.expired': 'Caducado', 'badge.nbf': 'Aún no válido', 'badge.bad': 'Mal formado', 'badge.jwe': 'Cifrado',
+      'msg.expires': 'Caduca {0}', 'msg.expired': 'Caducó {0}', 'msg.nbf': 'Será válido {0}', 'msg.noExp': 'Sin caducidad', 'msg.unsigned': 'Sin firmar', 'msg.encrypted': 'Payload cifrado',
+      'seg.header': 'Cabecera', 'seg.payload': 'Payload', 'seg.signature': 'Firma',
+      'err.segments': 'Un JWT tiene 3 partes separadas por puntos (un JWE, 5); hay {0}', 'err.empty': '{0}: sin contenido',
+      'err.badChar': '{0}: el carácter {2} ({1}) no es Base64URL válido (solo A–Z a–z 0–9 - _)',
+      'err.badLen': '{0}: longitud no válida para Base64URL', 'err.utf8': '{0}: los bytes decodificados no son texto UTF-8 válido',
+      'err.json': '{0}: no es JSON válido ({1})', 'err.notObject': '{0}: debe ser un objeto JSON',
+      'v.ok': 'Firma válida', 'v.bad': 'Firma no válida', 'v.na': 'No verificable',
+      'v.okMsg': 'La firma coincide con la clave ({0})', 'v.badMsg': 'La firma no coincide con la clave o el token se ha modificado',
+      'vr.noToken': 'Introduce primero un token bien formado', 'vr.noKey': 'Introduce una clave', 'vr.none': 'El token no está firmado (alg: none); no hay firma que verificar',
+      'vr.jwe': 'Los tokens JWE están cifrados y no tienen firma que verificar', 'vr.noAlg': 'La cabecera no tiene alg', 'vr.unsupported': 'Algoritmo no compatible: {0}',
+      'vr.noSubtle': 'Este navegador no ofrece WebCrypto (crypto.subtle)', 'vr.badKey': 'No se pudo importar la clave: formato no válido o no corresponde a {0}',
+      'vr.badB64': 'El secreto no es Base64 válido', 'vr.private': 'Es una clave privada; pega la clave pública correspondiente (-----BEGIN PUBLIC KEY-----)',
+      'vr.pemType': '{0} no es compatible; usa una clave pública -----BEGIN PUBLIC KEY----- (SPKI)', 'vr.keyFormat': 'Pega una clave pública PEM o un objeto JWK JSON',
+      'vr.badJson': 'La clave parece JWK, pero no es JSON válido', 'vr.noJwk': 'Ninguna clave del conjunto JWK coincide con el kid'
+    },
+    fr: {
+      'btn.copyHeader': 'Copier l’en-tête', 'btn.copyPayload': 'Copier la charge utile', 'btn.verify': 'Vérifier',
+      'tip.sample': 'Charge un jeton HS256 d’exemple et son secret your-256-bit-secret', 'tip.clear': 'Efface le jeton et la clé',
+      'tip.copyHeader': 'Copie l’en-tête en JSON formaté', 'tip.copyPayload': 'Copie la charge utile en JSON formaté', 'tip.verify': 'Vérifie la signature avec la clé ci-dessus (Ctrl/⌘ + Entrée)',
+      'pane.token': 'Jeton', 'pane.verify': 'Vérifier la signature', 'pane.result': 'Résultat',
+      'ph.token': 'Collez un JWT ; le préfixe Bearer, les espaces et retours à la ligne sont ignorés…',
+      'ph.keyHS': 'Saisissez le secret {0}…', 'ph.keyAsym': 'Collez la clé publique {0} : PEM (-----BEGIN PUBLIC KEY-----) ou JWK JSON…',
+      'ph.keyNone': 'Ce jeton n’est pas signé (alg: none) ; aucune clé n’est nécessaire', 'ph.keyWait': 'Saisissez un jeton ci-dessus, puis ici la clé pour le vérifier…',
+      'ph.keyJwe': 'Les jetons JWE sont chiffrés ; leur signature ne peut pas être vérifiée ici',
+      'opt.b64': 'Secret en Base64', 'tip.b64': 'Décode le secret en Base64 / Base64URL avant de l’utiliser comme clé HMAC', 'aria.key': 'Clé de vérification',
+      'meta.chars': '{0} caractères', 'meta.bearer': 'Préfixe Bearer retiré',
+      'sec.header': 'En-tête', 'sec.payload': 'Charge utile', 'sec.times': 'Dates', 'sec.claims': 'Claims standard', 'sec.signature': 'Signature', 'sec.bytes': '{0} octets',
+      'empty.result': 'Collez un JWT à gauche pour voir son en-tête, sa charge utile, ses dates et sa signature. Tout est décodé localement : le jeton ne quitte jamais cette page.',
+      'note.text': 'La charge utile n’est pas du JSON ; affichée comme texte',
+      'note.jwe': 'Jeton JWE chiffré (5 parties) : la charge utile est chiffrée et ne peut pas être affichée. Seul l’en-tête protégé figure ci-dessous.',
+      'note.none': 'Ce jeton n’est pas signé (alg: none). N’importe qui peut le falsifier : ne vous fiez pas à son contenu.',
+      'sig.empty': '(aucune signature)', 'time.bad': 'Horodatage numérique invalide',
+      'claim.iss': 'Émetteur', 'claim.sub': 'Sujet', 'claim.aud': 'Audience', 'claim.exp': 'Expiration', 'claim.nbf': 'Pas avant',
+      'claim.iat': 'Émis le', 'claim.jti': 'ID du jeton', 'claim.auth_time': 'Authentification',
+      'badge.idle': 'En attente', 'badge.valid': 'Valide', 'badge.expired': 'Expiré', 'badge.nbf': 'Pas encore valide', 'badge.bad': 'Mal formé', 'badge.jwe': 'Chiffré',
+      'msg.expires': 'Expire {0}', 'msg.expired': 'Expiré {0}', 'msg.nbf': 'Sera valide {0}', 'msg.noExp': 'Sans expiration', 'msg.unsigned': 'Non signé', 'msg.encrypted': 'Charge utile chiffrée',
+      'seg.header': 'En-tête', 'seg.payload': 'Charge utile', 'seg.signature': 'Signature',
+      'err.segments': 'Un JWT comporte 3 parties séparées par des points (5 pour un JWE) ; trouvé : {0}', 'err.empty': '{0} : vide',
+      'err.badChar': '{0} : le caractère {2} ({1}) n’est pas du Base64URL valide (uniquement A–Z a–z 0–9 - _)',
+      'err.badLen': '{0} : longueur invalide pour du Base64URL', 'err.utf8': '{0} : les octets décodés ne sont pas du texte UTF-8 valide',
+      'err.json': '{0} : JSON invalide ({1})', 'err.notObject': '{0} : doit être un objet JSON',
+      'v.ok': 'Signature valide', 'v.bad': 'Signature invalide', 'v.na': 'Vérification impossible',
+      'v.okMsg': 'La signature correspond à la clé ({0})', 'v.badMsg': 'La signature ne correspond pas à la clé, ou le jeton a été modifié',
+      'vr.noToken': 'Saisissez d’abord un jeton bien formé', 'vr.noKey': 'Saisissez une clé', 'vr.none': 'Le jeton n’est pas signé (alg: none) : aucune signature à vérifier',
+      'vr.jwe': 'Les jetons JWE sont chiffrés et n’ont pas de signature à vérifier', 'vr.noAlg': 'L’en-tête ne contient pas d’alg', 'vr.unsupported': 'Algorithme non pris en charge : {0}',
+      'vr.noSubtle': 'WebCrypto (crypto.subtle) n’est pas disponible dans ce navigateur', 'vr.badKey': 'Impossible d’importer la clé : format invalide ou clé non adaptée à {0}',
+      'vr.badB64': 'Le secret n’est pas du Base64 valide', 'vr.private': 'C’est une clé privée : collez plutôt la clé publique correspondante (-----BEGIN PUBLIC KEY-----)',
+      'vr.pemType': 'Le format {0} n’est pas pris en charge : utilisez une clé publique -----BEGIN PUBLIC KEY----- (SPKI)', 'vr.keyFormat': 'Collez une clé publique PEM ou un objet JWK JSON',
+      'vr.badJson': 'La clé ressemble à un JWK mais n’est pas du JSON valide', 'vr.noJwk': 'Aucune clé du jeu JWK ne correspond au kid'
+    },
+    de: {
+      'btn.copyHeader': 'Header kopieren', 'btn.copyPayload': 'Payload kopieren', 'btn.verify': 'Prüfen',
+      'tip.sample': 'Lädt ein HS256-Beispieltoken und sein Secret your-256-bit-secret', 'tip.clear': 'Token und Schlüssel leeren',
+      'tip.copyHeader': 'Header als formatiertes JSON kopieren', 'tip.copyPayload': 'Payload als formatiertes JSON kopieren', 'tip.verify': 'Signatur mit dem Schlüssel oben prüfen (Strg/⌘ + Enter)',
+      'pane.token': 'Token', 'pane.verify': 'Signatur prüfen', 'pane.result': 'Ergebnis',
+      'ph.token': 'JWT einfügen – Bearer-Präfix, Leerzeichen und Zeilenumbrüche werden ignoriert…',
+      'ph.keyHS': '{0}-Secret eingeben…', 'ph.keyAsym': 'Öffentlichen {0}-Schlüssel einfügen: PEM (-----BEGIN PUBLIC KEY-----) oder JWK-JSON…',
+      'ph.keyNone': 'Dieses Token ist unsigniert (alg: none); kein Schlüssel nötig', 'ph.keyWait': 'Oben ein Token eingeben, dann hier den Schlüssel zur Prüfung…',
+      'ph.keyJwe': 'JWE-Tokens sind verschlüsselt; ihre Signatur lässt sich hier nicht prüfen',
+      'opt.b64': 'Secret ist Base64', 'tip.b64': 'Secret vor der Verwendung als HMAC-Schlüssel Base64- / Base64URL-dekodieren', 'aria.key': 'Prüfschlüssel',
+      'meta.chars': '{0} Zeichen', 'meta.bearer': 'Bearer-Präfix entfernt',
+      'sec.header': 'Header', 'sec.payload': 'Payload', 'sec.times': 'Zeitangaben', 'sec.claims': 'Registrierte Claims', 'sec.signature': 'Signatur', 'sec.bytes': '{0} Bytes',
+      'empty.result': 'Fügen Sie links ein JWT ein, um Header, Payload, Zeitangaben und Signatur zu sehen. Alles wird lokal dekodiert – das Token verlässt diese Seite nie.',
+      'note.text': 'Die Payload ist kein JSON und wird als Text angezeigt',
+      'note.jwe': 'Dies ist ein verschlüsseltes JWE-Token (5 Teile): Die Payload ist verschlüsselt und kann nicht angezeigt werden. Unten steht nur der geschützte Header.',
+      'note.none': 'Dieses Token ist unsigniert (alg: none). Jeder kann es fälschen – vertrauen Sie seinem Inhalt nicht.',
+      'sig.empty': '(keine Signatur)', 'time.bad': 'Kein gültiger numerischer Zeitstempel',
+      'claim.iss': 'Aussteller', 'claim.sub': 'Subjekt', 'claim.aud': 'Zielgruppe', 'claim.exp': 'Ablauf', 'claim.nbf': 'Gültig ab',
+      'claim.iat': 'Ausgestellt', 'claim.jti': 'Token-ID', 'claim.auth_time': 'Anmeldezeit',
+      'badge.idle': 'Wartet', 'badge.valid': 'Gültig', 'badge.expired': 'Abgelaufen', 'badge.nbf': 'Noch nicht gültig', 'badge.bad': 'Fehlerhaft', 'badge.jwe': 'Verschlüsselt',
+      'msg.expires': 'Läuft {0} ab', 'msg.expired': 'Abgelaufen {0}', 'msg.nbf': 'Gültig {0}', 'msg.noExp': 'Kein Ablauf', 'msg.unsigned': 'Unsigniert', 'msg.encrypted': 'Payload verschlüsselt',
+      'seg.header': 'Header', 'seg.payload': 'Payload', 'seg.signature': 'Signatur',
+      'err.segments': 'Ein JWT besteht aus 3 durch Punkte getrennten Teilen (ein JWE aus 5); gefunden: {0}', 'err.empty': '{0}: leer',
+      'err.badChar': '{0}: Zeichen {2} ({1}) ist kein gültiges Base64URL (nur A–Z a–z 0–9 - _)',
+      'err.badLen': '{0}: ungültige Länge für Base64URL', 'err.utf8': '{0}: die dekodierten Bytes sind kein gültiger UTF-8-Text',
+      'err.json': '{0}: kein gültiges JSON ({1})', 'err.notObject': '{0}: muss ein JSON-Objekt sein',
+      'v.ok': 'Signatur gültig', 'v.bad': 'Signatur ungültig', 'v.na': 'Nicht prüfbar',
+      'v.okMsg': 'Die Signatur passt zum Schlüssel ({0})', 'v.badMsg': 'Die Signatur passt nicht zum Schlüssel, oder das Token wurde verändert',
+      'vr.noToken': 'Bitte zuerst ein korrekt aufgebautes Token eingeben', 'vr.noKey': 'Bitte einen Schlüssel eingeben', 'vr.none': 'Das Token ist unsigniert (alg: none); es gibt keine Signatur zu prüfen',
+      'vr.jwe': 'JWE-Tokens sind verschlüsselt und haben keine prüfbare Signatur', 'vr.noAlg': 'Im Header fehlt alg', 'vr.unsupported': 'Nicht unterstützter Algorithmus: {0}',
+      'vr.noSubtle': 'WebCrypto (crypto.subtle) ist in diesem Browser nicht verfügbar', 'vr.badKey': 'Schlüssel konnte nicht importiert werden: ungültiges Format oder passt nicht zu {0}',
+      'vr.badB64': 'Das Secret ist kein gültiges Base64', 'vr.private': 'Das ist ein privater Schlüssel – bitte den passenden öffentlichen Schlüssel (-----BEGIN PUBLIC KEY-----) einfügen',
+      'vr.pemType': '{0} wird nicht unterstützt – bitte einen öffentlichen Schlüssel -----BEGIN PUBLIC KEY----- (SPKI) verwenden', 'vr.keyFormat': 'Bitte einen öffentlichen PEM-Schlüssel oder ein JWK-JSON-Objekt einfügen',
+      'vr.badJson': 'Der Schlüssel sieht wie JWK aus, ist aber kein gültiges JSON', 'vr.noJwk': 'Kein Schlüssel im JWK-Set passt zur kid'
+    }
+  };
+
+  const SAMPLE_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyLCJleHAiOjQxMDI0NDQ4MDB9.2rJa0xN9x5QZQTvUhAcOtrF5qH6iGAmgFeTThC4mq8o';
+  const SAMPLE_SECRET = 'your-256-bit-secret';
+  const TIME_CLAIMS = ['exp', 'nbf', 'iat', 'auth_time'];
+  const REG_CLAIMS = ['iss', 'sub', 'aud', 'exp', 'nbf', 'iat', 'jti'];
+  const SHA = { 256: 'SHA-256', 384: 'SHA-384', 512: 'SHA-512' };
+  const CURVE = { 256: 'P-256', 384: 'P-384', 512: 'P-521' };
+  const PUBLIC_JWK = { RSA: ['kty', 'n', 'e'], EC: ['kty', 'crv', 'x', 'y'], OKP: ['kty', 'crv', 'x'] };
+  const TOKEN_RE = /("(?:[^"\\]|\\.)*")(\s*:)?|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(true|false|null)|([{}[\],])/g;
+
+  const $ = (id) => document.getElementById(id);
+  const tokenEl = $('token'), keyEl = $('key');
+
+  let state = { token: '', bearer: false, parsed: null };
+  let vResult = null;
+  let verifySeq = 0;
+  let timer = null;
+
+  const page = Toolbox.initPage({ current: 'jwt', text: TEXT, onLang: render });
+  const tr = page.tr;
+
+  // 错误以 [key, ...args] 保存，切换语言时重新翻译；{ seg } 参数是段名
+  const fail = (...reason) => Object.assign(new Error(reason[0]), { reason });
+  const say = (reason) => tr(reason[0], ...reason.slice(1).map((a) => (a && a.seg ? tr(a.seg) : a)));
+  const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  // ===== 解析 =====
+  function normalize(raw) {
+    let s = raw.trim();
+    const bearer = /^bearer\s+/i.test(s);
+    if (bearer) s = s.replace(/^bearer\s+/i, '');
+    return { token: s.replace(/\s+/g, ''), bearer };
+  }
+
+  function b64urlBytes(seg, name, allowEmpty) {
+    const clean = seg.replace(/=+$/, '');
+    if (!clean && !allowEmpty) throw fail('err.empty', { seg: name });
+    const bad = /[^A-Za-z0-9_-]/.exec(clean);
+    if (bad) throw fail('err.badChar', { seg: name }, JSON.stringify(bad[0]), bad.index + 1);
+    if (clean.length % 4 === 1) throw fail('err.badLen', { seg: name });
+    const bin = atob(clean.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - clean.length % 4) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+
+  function utf8(bytes, name) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (e) {
+      throw fail('err.utf8', { seg: name });
+    }
+  }
+
+  // 超出安全整数的数字保留原文，避免 ID 被四舍五入
+  const parseJson = (text) => JSON.parse(text, (k, v, ctx) =>
+    (JSON.rawJSON && Number.isInteger(v) && !Number.isSafeInteger(v) && ctx ? JSON.rawJSON(ctx.source) : v));
+
+  function snippet(text) {
+    const s = text.replace(/\s+/g, ' ').trim();
+    return s.length > 40 ? s.slice(0, 40) + '…' : s;
+  }
+
+  function decodeHeader(seg) {
+    const text = utf8(b64urlBytes(seg, 'seg.header'), 'seg.header');
+    let value;
+    try { value = parseJson(text); } catch (e) { throw fail('err.json', { seg: 'seg.header' }, snippet(text)); }
+    if (!isObj(value)) throw fail('err.notObject', { seg: 'seg.header' });
+    return value;
+  }
+
+  function parseToken(token) {
+    const parts = token.split('.');
+    const out = { parts };
+    if (parts.length !== 3 && parts.length !== 5) { out.error = ['err.segments', parts.length]; return out; }
+    try {
+      out.header = decodeHeader(parts[0]);
+      if (parts.length === 5) { out.jwe = true; return out; }
+      const text = utf8(b64urlBytes(parts[1], 'seg.payload'), 'seg.payload');
+      try { out.payload = parseJson(text); } catch (e) { out.payloadText = text; }
+      out.sig = b64urlBytes(parts[2], 'seg.signature', true);
+    } catch (e) {
+      if (!e.reason) throw e;
+      out.error = e.reason;
+    }
+    return out;
+  }
+
+  // ===== 时间 =====
+  const pad = (n) => String(n).padStart(2, '0');
+  const fmtDate = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+    pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+
+  function relTime(diff) {
+    const units = [[60, 'second', 1], [3600, 'minute', 60], [86400, 'hour', 3600], [86400 * 30, 'day', 86400],
+      [86400 * 365, 'month', 86400 * 30], [Infinity, 'year', 86400 * 365]];
+    const [, unit, size] = units.find((u) => Math.abs(diff) < u[0]);
+    return new Intl.RelativeTimeFormat(page.lang, { numeric: 'auto' }).format(Math.round(diff / size), unit);
+  }
+
+  function tokenStatus(p, now) {
+    if (!p) return { kind: 'idle', badge: 'badge.idle', msg: '' };
+    if (p.error) return { kind: 'err', badge: 'badge.bad', msg: say(p.error) };
+    const h = p.header;
+    const str = (v) => (v === undefined || v === null || v === '' ? '' : typeof v === 'string' ? v : JSON.stringify(v));
+    if (p.jwe) return { kind: 'warn', badge: 'badge.jwe', msg: ['JWE', str(h.alg), str(h.enc), tr('msg.encrypted')].filter(Boolean).join(' · ') };
+    const c = isObj(p.payload) ? p.payload : {};
+    const parts = [str(h.alg), str(h.typ)];
+    let kind = 'ok', badge = 'badge.valid';
+    if (isNum(c.exp) && now >= c.exp) {
+      kind = 'err'; badge = 'badge.expired';
+      parts.push(tr('msg.expired', relTime(c.exp - now)));
+    } else if (isNum(c.nbf) && now < c.nbf) {
+      kind = 'warn'; badge = 'badge.nbf';
+      parts.push(tr('msg.nbf', relTime(c.nbf - now)));
+    } else {
+      parts.push(isNum(c.exp) ? tr('msg.expires', relTime(c.exp - now)) : tr('msg.noExp'));
+    }
+    if (h.alg === 'none') parts.push(tr('msg.unsigned'));
+    if (p.payloadText !== undefined) parts.push(tr('note.text'));
+    return { kind, badge, msg: parts.filter(Boolean).join(' · ') };
+  }
+
+  // ===== 渲染 =====
+  function highlight(value) {
+    const text = JSON.stringify(value, null, 2);
+    const pre = el('pre', 'code-out');
+    const span = (cls, s) => pre.appendChild(el('span', cls, s));
+    let last = 0, m;
+    TOKEN_RE.lastIndex = 0;
+    while ((m = TOKEN_RE.exec(text))) {
+      if (m.index > last) pre.appendChild(document.createTextNode(text.slice(last, m.index)));
+      if (m[1]) { span(m[2] ? 'tok-key' : 'tok-str', m[1]); if (m[2]) span('tok-punc', m[2]); }
+      else if (m[3]) span('tok-num', m[3]);
+      else if (m[4]) span('tok-bool', m[4]);
+      else span('tok-punc', m[5]);
+      last = TOKEN_RE.lastIndex;
+    }
+    if (last < text.length) pre.appendChild(document.createTextNode(text.slice(last)));
+    return pre;
+  }
+
+  function section(titleKey, meta, ...content) {
+    const sec = el('section', 'sec');
+    const h = el('h3');
+    h.append(el('span', null, tr(titleKey)));
+    if (meta) h.append(el('span', 'meta', meta));
+    sec.append(h, ...content);
+    return sec;
+  }
+
+  function claimRow(name, ...cells) {
+    const row = el('tr');
+    row.append(el('th', null, name), el('td', 'desc', tr('claim.' + name)));
+    const td = el('td');
+    td.append(...cells);
+    row.append(td);
+    return row;
+  }
+
+  function timeCells(name, v, now) {
+    const date = isNum(v) ? new Date(v * 1000) : null;
+    if (!date || isNaN(date.getTime())) return [el('span', 'bad', tr('time.bad'))];
+    const cells = [el('span', null, fmtDate(date)), el('span', 'rel', relTime(v - now))];
+    let pill = null;
+    if (name === 'exp') pill = now >= v ? ['err', 'badge.expired'] : ['ok', 'badge.valid'];
+    if (name === 'nbf') pill = now < v ? ['warn', 'badge.nbf'] : ['ok', 'badge.valid'];
+    if (pill) cells.push(el('span', 'badge ' + pill[0], tr(pill[1])));
+    return cells;
+  }
+
+  function claimText(v) {
+    if (typeof v === 'string') return v;
+    if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v.join(', ');
+    return JSON.stringify(v);
+  }
+
+  function table(rows) {
+    const t = el('table', 'kv');
+    t.append(...rows);
+    return t;
+  }
+
+  function renderResult(now) {
+    const out = $('out');
+    const p = state.parsed;
+    const nodes = [];
+    $('outMeta').textContent = p && p.header ? (p.jwe ? 'JWE' : 'JWS') : '';
+    if (!p) {
+      out.replaceChildren(el('p', 'empty-hint', tr('empty.result')));
+      return;
+    }
+    if (p.error) nodes.push(el('div', 'note err', say(p.error)));
+    if (p.jwe) nodes.push(el('div', 'note', tr('note.jwe')));
+    if (p.header && p.header.alg === 'none' && !p.jwe) nodes.push(el('div', 'note', tr('note.none')));
+    if (p.header) nodes.push(section('sec.header', '', highlight(p.header)));
+    if (p.payload !== undefined) nodes.push(section('sec.payload', '', highlight(p.payload)));
+    if (p.payloadText !== undefined) {
+      nodes.push(section('sec.payload', tr('note.text'), el('pre', 'code-out', p.payloadText)));
+    }
+    if (isObj(p.payload)) {
+      const times = TIME_CLAIMS.filter((k) => k in p.payload);
+      if (times.length) nodes.push(section('sec.times', '', table(times.map((k) => claimRow(k, ...timeCells(k, p.payload[k], now))))));
+      const regs = REG_CLAIMS.filter((k) => k in p.payload);
+      if (regs.length) nodes.push(section('sec.claims', '', table(regs.map((k) => claimRow(k, claimText(p.payload[k]))))));
+    }
+    if (p.sig) {
+      nodes.push(section('sec.signature', tr('sec.bytes', p.sig.length), el('div', 'code-out', p.parts[2] || tr('sig.empty'))));
+    }
+    out.replaceChildren(...nodes);
+  }
+
+  function algSpec(alg) {
+    const m = /^(HS|RS|PS|ES)(256|384|512)$/.exec(alg);
+    if (m) {
+      const hash = SHA[m[2]];
+      if (m[1] === 'HS') return { family: 'hs', imp: { name: 'HMAC', hash }, ver: { name: 'HMAC' } };
+      if (m[1] === 'RS') return { family: 'asym', imp: { name: 'RSASSA-PKCS1-v1_5', hash }, ver: { name: 'RSASSA-PKCS1-v1_5' } };
+      if (m[1] === 'PS') return { family: 'asym', imp: { name: 'RSA-PSS', hash }, ver: { name: 'RSA-PSS', saltLength: m[2] / 8 } };
+      return { family: 'asym', imp: { name: 'ECDSA', namedCurve: CURVE[m[2]] }, ver: { name: 'ECDSA', hash } };
+    }
+    if (alg === 'EdDSA' || alg === 'Ed25519') return { family: 'asym', imp: { name: 'Ed25519' }, ver: { name: 'Ed25519' } };
+    return null;
+  }
+
+  function verifyMode() {
+    const p = state.parsed;
+    if (!p || p.error) return { mode: 'wait' };
+    const alg = p.header.alg;
+    if (p.jwe) return { mode: 'jwe', alg };
+    if (typeof alg !== 'string' || !alg) return { mode: 'noalg', alg };
+    if (alg === 'none') return { mode: 'none', alg };
+    const spec = algSpec(alg);
+    return spec ? { mode: spec.family, alg, spec } : { mode: 'unsupported', alg };
+  }
+
+  function renderVerifyArea() {
+    const vm = verifyMode();
+    const ph = {
+      wait: () => tr('ph.keyWait'), jwe: () => tr('ph.keyJwe'), noalg: () => tr('vr.noAlg'), none: () => tr('ph.keyNone'),
+      unsupported: () => tr('vr.unsupported', vm.alg), hs: () => tr('ph.keyHS', vm.alg), asym: () => tr('ph.keyAsym', vm.alg)
+    };
+    keyEl.placeholder = ph[vm.mode]();
+    $('algMeta').textContent = vm.alg === undefined ? '' : 'alg: ' + (typeof vm.alg === 'string' ? vm.alg : JSON.stringify(vm.alg));
+    $('b64Wrap').hidden = vm.mode !== 'hs';
+  }
+
+  function renderVerifyResult() {
+    const box = $('vResult');
+    box.hidden = !vResult;
+    if (!vResult) return;
+    const kind = { ok: 'ok', bad: 'err', na: 'warn' }[vResult.kind];
+    $('vBadge').className = 'badge ' + kind;
+    $('vBadge').textContent = tr('v.' + vResult.kind);
+    $('vMsg').textContent = vResult.kind === 'ok' ? tr('v.okMsg', vResult.alg) : vResult.kind === 'bad' ? tr('v.badMsg') : say(vResult.reason);
+  }
+
+  function renderStatus(now) {
+    const st = tokenStatus(state.parsed, now);
+    const badge = $('badge');
+    badge.className = 'badge ' + st.kind;
+    badge.textContent = tr(st.badge);
+    const msg = $('msg');
+    msg.className = 'status-msg' + (st.kind === 'err' ? ' error' : st.kind === 'warn' ? ' note' : '');
+    msg.textContent = st.msg;
+  }
+
+  function render() {
+    const now = Date.now() / 1000;
+    $('tokenMeta').textContent = state.token
+      ? (state.bearer ? tr('meta.bearer') + ' · ' : '') + tr('meta.chars', state.token.length.toLocaleString())
+      : '';
+    renderResult(now);
+    renderVerifyArea();
+    renderVerifyResult();
+    renderStatus(now);
+  }
+
+  function parseNow() {
+    clearTimeout(timer);
+    timer = null;
+    const { token, bearer } = normalize(tokenEl.value);
+    state = { token, bearer, parsed: token ? parseToken(token) : null };
+    render();
+  }
+
+  function flush() {
+    if (timer !== null) parseNow();
+  }
+
+  // ===== 验签 =====
+  function b64Bytes(text) {
+    const s = text.replace(/\s+/g, '').replace(/=+$/, '').replace(/-/g, '+').replace(/_/g, '/');
+    if (/[^A-Za-z0-9+/]/.test(s) || s.length % 4 === 1) return null;
+    const bin = atob(s + '='.repeat((4 - s.length % 4) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+
+  function publicJwk(jwk) {
+    if (!isObj(jwk)) throw fail('vr.keyFormat');
+    const fields = PUBLIC_JWK[jwk.kty];
+    if (!fields) return jwk;
+    const pub = { ext: true };
+    fields.forEach((f) => { if (jwk[f] !== undefined) pub[f] = jwk[f]; });
+    return pub;
+  }
+
+  function importHmac(spec, text) {
+    const raw = $('optB64').checked ? b64Bytes(text) : new TextEncoder().encode(text);
+    if (!raw) throw fail('vr.badB64');
+    if (!raw.length) throw fail('vr.noKey');
+    return crypto.subtle.importKey('raw', raw, spec.imp, false, ['verify']);
+  }
+
+  function importPublic(spec, text, kid) {
+    const s = text.trim();
+    if (s.startsWith('{')) {
+      let jwk;
+      try { jwk = JSON.parse(s); } catch (e) { throw fail('vr.badJson'); }
+      if (isObj(jwk) && Array.isArray(jwk.keys)) {
+        jwk = jwk.keys.find((k) => isObj(k) && kid !== undefined && k.kid === kid) || (jwk.keys.length === 1 ? jwk.keys[0] : null);
+        if (!jwk) throw fail('vr.noJwk');
+      }
+      return crypto.subtle.importKey('jwk', publicJwk(jwk), spec.imp, false, ['verify']);
+    }
+    const m = /-----BEGIN ([A-Z0-9 ]+)-----([\s\S]*?)-----END \1-----/.exec(s);
+    if (!m) throw fail('vr.keyFormat');
+    if (/PRIVATE/.test(m[1])) throw fail('vr.private');
+    if (m[1] !== 'PUBLIC KEY') throw fail('vr.pemType', m[1]);
+    const der = b64Bytes(m[2]);
+    if (!der) throw new Error('bad pem');
+    return crypto.subtle.importKey('spki', der, spec.imp, false, ['verify']);
+  }
+
+  async function checkSignature() {
+    const vm = verifyMode();
+    const na = (...reason) => ({ kind: 'na', reason });
+    const early = { wait: 'vr.noToken', jwe: 'vr.jwe', noalg: 'vr.noAlg', none: 'vr.none', unsupported: 'vr.unsupported' }[vm.mode];
+    if (early) return na(early, vm.alg);
+    if (!window.crypto || !window.crypto.subtle) return na('vr.noSubtle');
+    if (!keyEl.value.trim()) return na('vr.noKey');
+    const p = state.parsed;
+    let key;
+    try {
+      key = await (vm.mode === 'hs' ? importHmac(vm.spec, keyEl.value) : importPublic(vm.spec, keyEl.value, p.header.kid));
+    } catch (e) {
+      if (e.reason) return na(...e.reason);
+      if (e.name === 'NotSupportedError') return na('vr.unsupported', vm.alg);
+      return na('vr.badKey', vm.alg);
+    }
+    const data = new TextEncoder().encode(p.parts[0] + '.' + p.parts[1]);
+    let ok = false;
+    try { ok = await crypto.subtle.verify(vm.spec.ver, key, p.sig, data); } catch (e) { ok = false; }
+    return { kind: ok ? 'ok' : 'bad', alg: vm.alg };
+  }
+
+  async function verify() {
+    flush();
+    const seq = ++verifySeq;
+    const res = await checkSignature();
+    if (seq !== verifySeq) return;
+    vResult = res;
+    renderVerifyResult();
+  }
+
+  function resetVerify() {
+    verifySeq++;
+    vResult = null;
+    renderVerifyResult();
+  }
+
+  // ===== 事件 =====
+  tokenEl.addEventListener('input', () => {
+    resetVerify();
+    clearTimeout(timer);
+    timer = setTimeout(parseNow, 150);
+  });
+  keyEl.addEventListener('input', resetVerify);
+  keyEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); verify(); }
+  });
+  $('optB64').addEventListener('change', resetVerify);
+  $('btnVerify').addEventListener('click', verify);
+  $('btnSample').addEventListener('click', () => {
+    tokenEl.value = SAMPLE_TOKEN;
+    keyEl.value = SAMPLE_SECRET;
+    $('optB64').checked = false;
+    resetVerify();
+    parseNow();
+  });
+  $('btnClear').addEventListener('click', () => {
+    tokenEl.value = '';
+    keyEl.value = '';
+    resetVerify();
+    parseNow();
+    tokenEl.focus();
+    page.toast(tr('toast.cleared'));
+  });
+  $('btnCopyHeader').addEventListener('click', () => {
+    flush();
+    const p = state.parsed;
+    page.copy(p && p.header ? JSON.stringify(p.header, null, 2) : '');
+  });
+  $('btnCopyPayload').addEventListener('click', () => {
+    flush();
+    const p = state.parsed;
+    if (p && p.payload !== undefined) page.copy(JSON.stringify(p.payload, null, 2));
+    else page.copy(p && p.payloadText !== undefined ? p.payloadText : '');
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

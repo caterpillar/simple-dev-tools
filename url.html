@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>URL 编码</title>
+<meta name="description" content="本地离线 URL 编码与解码：组件 / 完整 URL、空格转 +、逐行处理，并可拆解链接的协议、主机、路径和查询参数。">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="toolbox.css">
+<script src="toolbox-nav.js"></script>
+<style>
+  .scope { display: inline-flex; align-items: center; gap: 5px; }
+  .scope:has(select:disabled) { opacity: .45; }
+  .toolbar select:disabled, .toolbar select:disabled:hover { cursor: default; background: var(--panel-2); border-color: var(--border); }
+  .info { padding-bottom: 16px; }
+  .info h3 {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin: 0; padding: 14px 12px 6px;
+    font-size: 12px; font-weight: 600; color: var(--muted);
+  }
+  .info .note {
+    margin: 10px 12px 0; padding: 6px 10px; border-radius: 6px; font-size: 12.5px;
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  }
+  .info .muted, .info .empty-msg { color: var(--muted); font-family: inherit; }
+  .info .empty-msg { margin: 4px 12px; font-size: 12.5px; }
+  .info .kv { border-top: 1px solid var(--border); }
+  .mini {
+    flex: 0 0 auto;
+    font-size: calc(var(--chk-fs) - 1px); font-weight: 400; line-height: 1.3;
+    padding: 2px calc(var(--ctl-px) - 2px); border-radius: 5px;
+  }
+  .ptable { width: 100%; border-collapse: collapse; font-size: 12.5px; border-top: 1px solid var(--border); }
+  .ptable th, .ptable td { padding: 6px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+  .ptable th { font-size: 12px; font-weight: 500; color: var(--muted); background: var(--panel); white-space: nowrap; }
+  .ptable td { font-family: var(--mono); word-break: break-all; overflow-wrap: anywhere; }
+  .ptable .n { width: 1%; color: var(--muted); white-space: nowrap; }
+  .ptable .k { width: 32%; color: var(--key); }
+  .ptable .act { width: 1%; padding: 4px 8px; font-family: inherit; text-align: right; white-space: nowrap; }
+  .ptable tr:hover td { background: var(--panel); }
+</style>
+</head>
+<body>
+<header class="titlebar">
+  <nav class="tool-tabs" id="toolTabs" data-current="url"></nav>
+  <div class="titlebar-right" id="toolboxControls"></div>
+</header>
+
+<div class="toolbar">
+  <span class="seg" role="group" data-i18n-aria="aria.mode">
+    <button type="button" id="modeEncode" data-mode="encode" aria-pressed="true" data-i18n="mode.encode">编码</button>
+    <button type="button" id="modeDecode" data-mode="decode" aria-pressed="false" data-i18n="mode.decode">解码</button>
+    <button type="button" id="modeParse" data-mode="parse" aria-pressed="false" data-i18n="mode.parse">解析</button>
+  </span>
+  <span class="tb-sep"></span>
+  <label class="tb-label scope" data-i18n-title="tip.scope">
+    <span data-i18n="opt.scope">范围</span>
+    <select id="optScope">
+      <option value="comp" data-i18n="opt.comp">组件</option>
+      <option value="full" data-i18n="opt.full">完整 URL</option>
+    </select>
+  </label>
+  <label class="chk" data-i18n-title="tip.plus"><input type="checkbox" id="optPlus"><span data-i18n="opt.plus">空格用 +</span></label>
+  <label class="chk" data-i18n-title="tip.lines"><input type="checkbox" id="optLines"><span data-i18n="opt.lines">逐行处理</span></label>
+  <span class="tb-sep"></span>
+  <button type="button" id="btnSample" data-i18n="btn.sample" data-i18n-title="tip.sample">示例</button>
+  <button type="button" id="btnSwap" data-i18n="btn.swap" data-i18n-title="tip.swap">交换</button>
+  <button type="button" id="btnClear" data-i18n="btn.clear" data-i18n-title="tip.clear">清空</button>
+  <span class="tb-sep"></span>
+  <button type="button" id="btnCopy" data-i18n="btn.copyOut" data-i18n-title="tip.copyOut">复制结果</button>
+</div>
+
+<main class="workspace">
+  <section class="pane">
+    <div class="pane-head"><span data-i18n="pane.input">输入</span><span class="meta" id="inMeta"></span></div>
+    <div class="pane-body">
+      <textarea class="code" id="input" spellcheck="false" autocomplete="off" data-i18n-aria="pane.input"></textarea>
+    </div>
+  </section>
+  <section class="pane">
+    <div class="pane-head"><span id="outLabel">输出</span><span class="meta" id="outMeta"></span></div>
+    <div class="pane-body">
+      <textarea class="code" id="output" readonly spellcheck="false" data-i18n-aria="pane.output"></textarea>
+      <div class="info" id="parseView" hidden></div>
+    </div>
+  </section>
+</main>
+
+<footer class="status">
+  <span class="badge idle" id="badge"></span>
+  <span class="status-msg" id="msg"></span>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  const TEXT = {
+    'zh-CN': {
+      'mode.encode': '编码', 'mode.decode': '解码', 'mode.parse': '解析', 'aria.mode': '模式',
+      'opt.scope': '范围', 'opt.comp': '组件', 'opt.full': '完整 URL',
+      'tip.scope': '组件：按 encodeURIComponent 编码全部保留字符，适合单个参数值；完整 URL：按 encodeURI 保留 : / ? # & = 等结构字符',
+      'opt.plus': '空格用 +', 'tip.plus': '编码时空格写成 +（application/x-www-form-urlencoded 表单格式）；解码时把 + 当作空格',
+      'opt.lines': '逐行处理', 'tip.lines': '每一行分别编码或解码，保留换行',
+      'tip.sample': '载入当前模式的示例', 'btn.swap': '交换', 'tip.swap': '把输出作为新的输入，并切换编码 / 解码（解析模式不可用）',
+      'tip.clear': '清空输入', 'btn.copyOut': '复制结果', 'tip.copyOut': '复制右侧结果；解析模式下复制整张表（制表符分隔）',
+      'pane.input': '输入', 'pane.output': '输出', 'pane.parsed': '解析结果',
+      'ph.encode': '输入要编码的文本，例如 a=中文 & b=1…', 'ph.decode': '粘贴要解码的文本，例如 %E4%BD%A0%E5%A5%BD…',
+      'ph.parse': '粘贴一个链接，例如 https://example.com/path?a=1#top…',
+      'meta.chars': '{0} 字符', 'meta.params': '{0} 个参数',
+      'badge.idle': '待输入', 'badge.ok': '成功', 'badge.err': '错误',
+      'msg.encoded': '已编码：{0} → {1} 字符', 'msg.decoded': '已解码：{0} → {1} 字符', 'msg.byLine': '（逐行，共 {0} 行）',
+      'msg.parsed': '解析成功 · {0} 个查询参数',
+      'note.assumed': '没有写协议，已按 https:// 解析', 'note.firstLine': '输入有多行，只解析了第一个非空行',
+      'pos.char': '第 {0} 个字符', 'pos.lineCol': '第 {0} 行第 {1} 列',
+      'err.badEsc': '{0}处的“{1}”不是有效的转义：% 后面必须是两位十六进制数字',
+      'err.badUtf8': '{0}处的“{1}”不是完整有效的 UTF-8 字节序列',
+      'err.surrogate': '{0}是不成对的代理项（{1}），无法按 UTF-8 编码',
+      'err.url': '无法解析：这不是有效的 URL',
+      'sec.parts': '链接组成', 'sec.params': '查询参数 ({0})',
+      'f.href': '完整链接', 'f.protocol': '协议', 'f.username': '用户名', 'f.password': '密码', 'f.hostname': '主机名', 'f.port': '端口',
+      'f.origin': '源', 'f.pathname': '路径', 'f.pathDec': '路径（解码）', 'f.search': '查询字符串', 'f.hash': '片段', 'f.hashDec': '片段（解码）',
+      'v.none': '（无）', 'v.empty': '（空）', 'v.defPort': '{0}（默认）', 'v.badDec': '（含无法解码的转义，保留原样）',
+      'col.key': '键', 'col.value': '值', 'btn.copyJson': '复制为 JSON', 'tip.copyJson': '把查询参数复制为 JSON 对象，重复的键合并为数组',
+      'tip.copyRow': '复制这个值', 'params.none': '没有查询参数'
+    },
+    'zh-TW': {
+      'mode.encode': '編碼', 'mode.decode': '解碼', 'mode.parse': '解析', 'aria.mode': '模式',
+      'opt.scope': '範圍', 'opt.comp': '元件', 'opt.full': '完整 URL',
+      'tip.scope': '元件：以 encodeURIComponent 編碼所有保留字元，適合單一參數值；完整 URL：以 encodeURI 保留 : / ? # & = 等結構字元',
+      'opt.plus': '空格用 +', 'tip.plus': '編碼時空格寫成 +（application/x-www-form-urlencoded 表單格式）；解碼時把 + 視為空格',
+      'opt.lines': '逐行處理', 'tip.lines': '每一行分別編碼或解碼，保留換行',
+      'tip.sample': '載入目前模式的範例', 'btn.swap': '交換', 'tip.swap': '把輸出作為新的輸入，並切換編碼 / 解碼（解析模式不適用）',
+      'tip.clear': '清空輸入', 'btn.copyOut': '複製結果', 'tip.copyOut': '複製右側結果；解析模式下複製整張表（以 Tab 分隔）',
+      'pane.input': '輸入', 'pane.output': '輸出', 'pane.parsed': '解析結果',
+      'ph.encode': '輸入要編碼的文字，例如 a=中文 & b=1…', 'ph.decode': '貼上要解碼的文字，例如 %E4%BD%A0%E5%A5%BD…',
+      'ph.parse': '貼上一個連結，例如 https://example.com/path?a=1#top…',
+      'meta.chars': '{0} 字元', 'meta.params': '{0} 個參數',
+      'badge.idle': '待輸入', 'badge.ok': '成功', 'badge.err': '錯誤',
+      'msg.encoded': '已編碼：{0} → {1} 字元', 'msg.decoded': '已解碼：{0} → {1} 字元', 'msg.byLine': '（逐行，共 {0} 行）',
+      'msg.parsed': '解析成功 · {0} 個查詢參數',
+      'note.assumed': '沒有寫協定，已按 https:// 解析', 'note.firstLine': '輸入有多行，只解析了第一個非空行',
+      'pos.char': '第 {0} 個字元', 'pos.lineCol': '第 {0} 行第 {1} 欄',
+      'err.badEsc': '{0}處的「{1}」不是有效的跳脫序列：% 後面必須是兩位十六進位數字',
+      'err.badUtf8': '{0}處的「{1}」不是完整有效的 UTF-8 位元組序列',
+      'err.surrogate': '{0}是不成對的代理字元（{1}），無法以 UTF-8 編碼',
+      'err.url': '無法解析：這不是有效的 URL',
+      'sec.parts': '連結組成', 'sec.params': '查詢參數 ({0})',
+      'f.href': '完整連結', 'f.protocol': '協定', 'f.username': '使用者名稱', 'f.password': '密碼', 'f.hostname': '主機名稱', 'f.port': '連接埠',
+      'f.origin': '來源', 'f.pathname': '路徑', 'f.pathDec': '路徑（解碼）', 'f.search': '查詢字串', 'f.hash': '片段', 'f.hashDec': '片段（解碼）',
+      'v.none': '（無）', 'v.empty': '（空）', 'v.defPort': '{0}（預設）', 'v.badDec': '（含無法解碼的跳脫序列，保留原樣）',
+      'col.key': '鍵', 'col.value': '值', 'btn.copyJson': '複製為 JSON', 'tip.copyJson': '把查詢參數複製為 JSON 物件，重複的鍵合併為陣列',
+      'tip.copyRow': '複製這個值', 'params.none': '沒有查詢參數'
+    },
+    en: {
+      'mode.encode': 'Encode', 'mode.decode': 'Decode', 'mode.parse': 'Parse', 'aria.mode': 'Mode',
+      'opt.scope': 'Scope', 'opt.comp': 'Component', 'opt.full': 'Full URL',
+      'tip.scope': 'Component: encodeURIComponent escapes every reserved character, best for a single parameter value. Full URL: encodeURI keeps structural characters such as : / ? # & =',
+      'opt.plus': 'Space as +', 'tip.plus': 'Encode: write spaces as + (application/x-www-form-urlencoded). Decode: treat + as a space',
+      'opt.lines': 'Line by line', 'tip.lines': 'Encode or decode each line separately, keeping line breaks',
+      'tip.sample': 'Load a sample for the current mode', 'btn.swap': 'Swap', 'tip.swap': 'Use the output as the new input and flip encode / decode (not available in Parse mode)',
+      'tip.clear': 'Clear input', 'btn.copyOut': 'Copy result', 'tip.copyOut': 'Copy the result on the right; in Parse mode, copies the whole table (tab-separated)',
+      'pane.input': 'Input', 'pane.output': 'Output', 'pane.parsed': 'Parsed',
+      'ph.encode': 'Type text to encode, e.g. a=hello world & b=1…', 'ph.decode': 'Paste text to decode, e.g. hello%20world%21…',
+      'ph.parse': 'Paste a link, e.g. https://example.com/path?a=1#top…',
+      'meta.chars': '{0} chars', 'meta.params': 'Params: {0}',
+      'badge.idle': 'Waiting', 'badge.ok': 'Done', 'badge.err': 'Error',
+      'msg.encoded': 'Encoded: {0} → {1} chars', 'msg.decoded': 'Decoded: {0} → {1} chars', 'msg.byLine': ' (line by line, {0} lines)',
+      'msg.parsed': 'Parsed · query parameters: {0}',
+      'note.assumed': 'No scheme given, parsed as https://', 'note.firstLine': 'Multiple lines entered; only the first non-empty line was parsed',
+      'pos.char': 'character {0}', 'pos.lineCol': 'line {0}, column {1}',
+      'err.badEsc': 'Invalid escape “{1}” at {0}: % must be followed by two hex digits',
+      'err.badUtf8': 'Invalid or incomplete UTF-8 sequence “{1}” at {0}',
+      'err.surrogate': 'Unpaired surrogate ({1}) at {0} cannot be encoded as UTF-8',
+      'err.url': 'Cannot parse: this is not a valid URL',
+      'sec.parts': 'Components', 'sec.params': 'Query parameters ({0})',
+      'f.href': 'Full link', 'f.protocol': 'Protocol', 'f.username': 'Username', 'f.password': 'Password', 'f.hostname': 'Hostname', 'f.port': 'Port',
+      'f.origin': 'Origin', 'f.pathname': 'Path', 'f.pathDec': 'Path (decoded)', 'f.search': 'Query string', 'f.hash': 'Fragment', 'f.hashDec': 'Fragment (decoded)',
+      'v.none': '(none)', 'v.empty': '(empty)', 'v.defPort': '{0} (default)', 'v.badDec': '(contains undecodable escapes; shown as is)',
+      'col.key': 'Key', 'col.value': 'Value', 'btn.copyJson': 'Copy as JSON', 'tip.copyJson': 'Copy the parameters as a JSON object; repeated keys become arrays',
+      'tip.copyRow': 'Copy this value', 'params.none': 'No query parameters'
+    },
+    ja: {
+      'mode.encode': 'エンコード', 'mode.decode': 'デコード', 'mode.parse': '解析', 'aria.mode': 'モード',
+      'opt.scope': '範囲', 'opt.comp': 'コンポーネント', 'opt.full': 'URL 全体',
+      'tip.scope': 'コンポーネント：encodeURIComponent で予約文字もすべてエスケープ（パラメーター値向け）。URL 全体：encodeURI で : / ? # & = などの区切り文字を残します',
+      'opt.plus': '空白を +', 'tip.plus': 'エンコード時は空白を + に（application/x-www-form-urlencoded 形式）。デコード時は + を空白として扱います',
+      'opt.lines': '行ごと', 'tip.lines': '各行を個別にエンコード / デコードし、改行を保持します',
+      'tip.sample': '現在のモードのサンプルを読み込む', 'btn.swap': '入れ替え', 'tip.swap': '出力を新しい入力にし、エンコード / デコードを切り替えます（解析モードでは使えません）',
+      'tip.clear': '入力をクリア', 'btn.copyOut': '結果をコピー', 'tip.copyOut': '右側の結果をコピー。解析モードでは表全体をタブ区切りでコピーします',
+      'pane.input': '入力', 'pane.output': '出力', 'pane.parsed': '解析結果',
+      'ph.encode': 'エンコードするテキストを入力（例：a=日本語 & b=1）…', 'ph.decode': 'デコードするテキストを貼り付け（例：%E4%BD%A0%E5%A5%BD）…',
+      'ph.parse': 'リンクを貼り付け（例：https://example.com/path?a=1#top）…',
+      'meta.chars': '{0} 文字', 'meta.params': 'パラメーター {0} 個',
+      'badge.idle': '入力待ち', 'badge.ok': '完了', 'badge.err': 'エラー',
+      'msg.encoded': 'エンコード完了：{0} → {1} 文字', 'msg.decoded': 'デコード完了：{0} → {1} 文字', 'msg.byLine': '（行ごと、{0} 行）',
+      'msg.parsed': '解析完了 · クエリパラメーター {0} 個',
+      'note.assumed': 'スキームがないため https:// として解析しました', 'note.firstLine': '複数行あるため、最初の空でない行のみ解析しました',
+      'pos.char': '{0} 文字目', 'pos.lineCol': '{0} 行 {1} 列目',
+      'err.badEsc': '{0}の「{1}」は無効なエスケープです：% の後には 16 進数 2 桁が必要です',
+      'err.badUtf8': '{0}の「{1}」は不完全または無効な UTF-8 バイト列です',
+      'err.surrogate': '{0}は対になっていないサロゲート（{1}）のため、UTF-8 にエンコードできません',
+      'err.url': '解析できません：有効な URL ではありません',
+      'sec.parts': '構成要素', 'sec.params': 'クエリパラメーター ({0})',
+      'f.href': '完全なリンク', 'f.protocol': 'プロトコル', 'f.username': 'ユーザー名', 'f.password': 'パスワード', 'f.hostname': 'ホスト名', 'f.port': 'ポート',
+      'f.origin': 'オリジン', 'f.pathname': 'パス', 'f.pathDec': 'パス（デコード）', 'f.search': 'クエリ文字列', 'f.hash': 'フラグメント', 'f.hashDec': 'フラグメント（デコード）',
+      'v.none': '（なし）', 'v.empty': '（空）', 'v.defPort': '{0}（既定）', 'v.badDec': '（デコードできないエスケープを含むため原文のまま）',
+      'col.key': 'キー', 'col.value': '値', 'btn.copyJson': 'JSON でコピー', 'tip.copyJson': 'クエリパラメーターを JSON オブジェクトとしてコピー。重複するキーは配列になります',
+      'tip.copyRow': 'この値をコピー', 'params.none': 'クエリパラメーターはありません'
+    },
+    ko: {
+      'mode.encode': '인코딩', 'mode.decode': '디코딩', 'mode.parse': '분석', 'aria.mode': '모드',
+      'opt.scope': '범위', 'opt.comp': '구성 요소', 'opt.full': '전체 URL',
+      'tip.scope': '구성 요소: encodeURIComponent 로 예약 문자까지 모두 인코딩합니다(매개변수 값에 적합). 전체 URL: encodeURI 로 : / ? # & = 같은 구조 문자를 유지합니다',
+      'opt.plus': '공백을 +로', 'tip.plus': '인코딩할 때 공백을 + 로 씁니다(application/x-www-form-urlencoded 형식). 디코딩할 때 + 를 공백으로 처리합니다',
+      'opt.lines': '줄 단위', 'tip.lines': '각 줄을 따로 인코딩 / 디코딩하고 줄바꿈을 유지합니다',
+      'tip.sample': '현재 모드의 예시 불러오기', 'btn.swap': '바꾸기', 'tip.swap': '출력을 새 입력으로 쓰고 인코딩 / 디코딩을 전환합니다(분석 모드에서는 사용할 수 없음)',
+      'tip.clear': '입력 지우기', 'btn.copyOut': '결과 복사', 'tip.copyOut': '오른쪽 결과를 복사합니다. 분석 모드에서는 표 전체를 탭으로 구분해 복사합니다',
+      'pane.input': '입력', 'pane.output': '출력', 'pane.parsed': '분석 결과',
+      'ph.encode': '인코딩할 텍스트를 입력하세요. 예: a=한글 & b=1…', 'ph.decode': '디코딩할 텍스트를 붙여 넣으세요. 예: %ED%95%9C%EA%B8%80…',
+      'ph.parse': '링크를 붙여 넣으세요. 예: https://example.com/path?a=1#top…',
+      'meta.chars': '{0}자', 'meta.params': '매개변수 {0}개',
+      'badge.idle': '입력 대기', 'badge.ok': '완료', 'badge.err': '오류',
+      'msg.encoded': '인코딩 완료: {0} → {1}자', 'msg.decoded': '디코딩 완료: {0} → {1}자', 'msg.byLine': ' (줄 단위, {0}줄)',
+      'msg.parsed': '분석 완료 · 쿼리 매개변수 {0}개',
+      'note.assumed': '스킴이 없어 https:// 로 분석했습니다', 'note.firstLine': '여러 줄이 입력되어 비어 있지 않은 첫 줄만 분석했습니다',
+      'pos.char': '{0}번째 문자', 'pos.lineCol': '{0}행 {1}열',
+      'err.badEsc': '{0}의 "{1}" 은(는) 잘못된 이스케이프입니다. % 뒤에는 16진수 두 자리가 와야 합니다',
+      'err.badUtf8': '{0}의 "{1}" 은(는) 불완전하거나 잘못된 UTF-8 바이트 시퀀스입니다',
+      'err.surrogate': '{0}에 짝이 없는 서로게이트({1})가 있어 UTF-8 로 인코딩할 수 없습니다',
+      'err.url': '분석할 수 없습니다: 올바른 URL 이 아닙니다',
+      'sec.parts': '구성 요소', 'sec.params': '쿼리 매개변수 ({0})',
+      'f.href': '전체 링크', 'f.protocol': '프로토콜', 'f.username': '사용자 이름', 'f.password': '비밀번호', 'f.hostname': '호스트 이름', 'f.port': '포트',
+      'f.origin': '오리진', 'f.pathname': '경로', 'f.pathDec': '경로 (디코딩)', 'f.search': '쿼리 문자열', 'f.hash': '프래그먼트', 'f.hashDec': '프래그먼트 (디코딩)',
+      'v.none': '(없음)', 'v.empty': '(비어 있음)', 'v.defPort': '{0} (기본값)', 'v.badDec': '(디코딩할 수 없는 이스케이프가 있어 원문 그대로 표시)',
+      'col.key': '키', 'col.value': '값', 'btn.copyJson': 'JSON 으로 복사', 'tip.copyJson': '쿼리 매개변수를 JSON 객체로 복사합니다. 중복된 키는 배열로 합칩니다',
+      'tip.copyRow': '이 값 복사', 'params.none': '쿼리 매개변수가 없습니다'
+    },
+    es: {
+      'mode.encode': 'Codificar', 'mode.decode': 'Decodificar', 'mode.parse': 'Analizar', 'aria.mode': 'Modo',
+      'opt.scope': 'Alcance', 'opt.comp': 'Componente', 'opt.full': 'URL completa',
+      'tip.scope': 'Componente: encodeURIComponent escapa todos los caracteres reservados, ideal para el valor de un parámetro. URL completa: encodeURI conserva caracteres estructurales como : / ? # & =',
+      'opt.plus': 'Espacio como +', 'tip.plus': 'Al codificar, escribe los espacios como + (application/x-www-form-urlencoded). Al decodificar, trata + como espacio',
+      'opt.lines': 'Por líneas', 'tip.lines': 'Codifica o decodifica cada línea por separado y conserva los saltos de línea',
+      'tip.sample': 'Cargar un ejemplo para el modo actual', 'btn.swap': 'Intercambiar', 'tip.swap': 'Usa la salida como nueva entrada y cambia codificar / decodificar (no disponible en Analizar)',
+      'tip.clear': 'Vaciar la entrada', 'btn.copyOut': 'Copiar resultado', 'tip.copyOut': 'Copia el resultado de la derecha; en Analizar copia toda la tabla (separada por tabulaciones)',
+      'pane.input': 'Entrada', 'pane.output': 'Salida', 'pane.parsed': 'Análisis',
+      'ph.encode': 'Escribe el texto a codificar, p. ej. a=año nuevo & b=1…', 'ph.decode': 'Pega el texto a decodificar, p. ej. a%C3%B1o%20nuevo…',
+      'ph.parse': 'Pega un enlace, p. ej. https://example.com/path?a=1#top…',
+      'meta.chars': '{0} caracteres', 'meta.params': 'Parámetros: {0}',
+      'badge.idle': 'En espera', 'badge.ok': 'Listo', 'badge.err': 'Error',
+      'msg.encoded': 'Codificado: {0} → {1} caracteres', 'msg.decoded': 'Decodificado: {0} → {1} caracteres', 'msg.byLine': ' (por líneas, {0} líneas)',
+      'msg.parsed': 'Análisis correcto · parámetros de consulta: {0}',
+      'note.assumed': 'Sin esquema: se ha analizado como https://', 'note.firstLine': 'Hay varias líneas: solo se ha analizado la primera no vacía',
+      'pos.char': 'el carácter {0}', 'pos.lineCol': 'la línea {0}, columna {1}',
+      'err.badEsc': 'Escape no válido «{1}» en {0}: % debe ir seguido de dos dígitos hexadecimales',
+      'err.badUtf8': 'Secuencia UTF-8 incompleta o no válida «{1}» en {0}',
+      'err.surrogate': 'Sustituto suelto ({1}) en {0}: no se puede codificar en UTF-8',
+      'err.url': 'No se puede analizar: no es una URL válida',
+      'sec.parts': 'Componentes', 'sec.params': 'Parámetros de consulta ({0})',
+      'f.href': 'Enlace completo', 'f.protocol': 'Protocolo', 'f.username': 'Usuario', 'f.password': 'Contraseña', 'f.hostname': 'Nombre de host', 'f.port': 'Puerto',
+      'f.origin': 'Origen', 'f.pathname': 'Ruta', 'f.pathDec': 'Ruta (decodificada)', 'f.search': 'Cadena de consulta', 'f.hash': 'Fragmento', 'f.hashDec': 'Fragmento (decodificado)',
+      'v.none': '(ninguno)', 'v.empty': '(vacío)', 'v.defPort': '{0} (predeterminado)', 'v.badDec': '(contiene escapes no decodificables; se muestra tal cual)',
+      'col.key': 'Clave', 'col.value': 'Valor', 'btn.copyJson': 'Copiar como JSON', 'tip.copyJson': 'Copia los parámetros como objeto JSON; las claves repetidas se agrupan en arrays',
+      'tip.copyRow': 'Copiar este valor', 'params.none': 'No hay parámetros de consulta'
+    },
+    fr: {
+      'mode.encode': 'Encoder', 'mode.decode': 'Décoder', 'mode.parse': 'Analyser', 'aria.mode': 'Mode',
+      'opt.scope': 'Portée', 'opt.comp': 'Composant', 'opt.full': 'URL complète',
+      'tip.scope': 'Composant : encodeURIComponent échappe tous les caractères réservés, idéal pour la valeur d’un paramètre. URL complète : encodeURI conserve les caractères de structure comme : / ? # & =',
+      'opt.plus': 'Espace en +', 'tip.plus': 'À l’encodage, écrit les espaces en + (application/x-www-form-urlencoded). Au décodage, traite + comme une espace',
+      'opt.lines': 'Ligne par ligne', 'tip.lines': 'Encode ou décode chaque ligne séparément en conservant les retours à la ligne',
+      'tip.sample': 'Charger un exemple pour le mode actuel', 'btn.swap': 'Inverser', 'tip.swap': 'Utilise la sortie comme nouvelle entrée et inverse encoder / décoder (indisponible en mode Analyser)',
+      'tip.clear': 'Effacer l’entrée', 'btn.copyOut': 'Copier le résultat', 'tip.copyOut': 'Copie le résultat de droite ; en mode Analyser, copie tout le tableau (séparé par des tabulations)',
+      'pane.input': 'Entrée', 'pane.output': 'Sortie', 'pane.parsed': 'Analyse',
+      'ph.encode': 'Saisissez le texte à encoder, p. ex. a=été & b=1…', 'ph.decode': 'Collez le texte à décoder, p. ex. %C3%A9t%C3%A9…',
+      'ph.parse': 'Collez un lien, p. ex. https://example.com/path?a=1#top…',
+      'meta.chars': '{0} caractères', 'meta.params': 'Paramètres : {0}',
+      'badge.idle': 'En attente', 'badge.ok': 'Terminé', 'badge.err': 'Erreur',
+      'msg.encoded': 'Encodé : {0} → {1} caractères', 'msg.decoded': 'Décodé : {0} → {1} caractères', 'msg.byLine': ' (ligne par ligne, {0} lignes)',
+      'msg.parsed': 'Analyse réussie · paramètres de requête : {0}',
+      'note.assumed': 'Aucun schéma indiqué : analysé comme https://', 'note.firstLine': 'Plusieurs lignes saisies : seule la première ligne non vide a été analysée',
+      'pos.char': 'au caractère {0}', 'pos.lineCol': 'à la ligne {0}, colonne {1}',
+      'err.badEsc': 'Échappement invalide « {1} » {0} : % doit être suivi de deux chiffres hexadécimaux',
+      'err.badUtf8': 'Séquence UTF-8 incomplète ou invalide « {1} » {0}',
+      'err.surrogate': 'Demi-codet isolé ({1}) {0} : impossible à encoder en UTF-8',
+      'err.url': 'Analyse impossible : ce n’est pas une URL valide',
+      'sec.parts': 'Composants', 'sec.params': 'Paramètres de requête ({0})',
+      'f.href': 'Lien complet', 'f.protocol': 'Protocole', 'f.username': 'Utilisateur', 'f.password': 'Mot de passe', 'f.hostname': 'Nom d’hôte', 'f.port': 'Port',
+      'f.origin': 'Origine', 'f.pathname': 'Chemin', 'f.pathDec': 'Chemin (décodé)', 'f.search': 'Chaîne de requête', 'f.hash': 'Fragment', 'f.hashDec': 'Fragment (décodé)',
+      'v.none': '(aucun)', 'v.empty': '(vide)', 'v.defPort': '{0} (par défaut)', 'v.badDec': '(contient des échappements indécodables ; affiché tel quel)',
+      'col.key': 'Clé', 'col.value': 'Valeur', 'btn.copyJson': 'Copier en JSON', 'tip.copyJson': 'Copie les paramètres sous forme d’objet JSON ; les clés répétées deviennent des tableaux',
+      'tip.copyRow': 'Copier cette valeur', 'params.none': 'Aucun paramètre de requête'
+    },
+    de: {
+      'mode.encode': 'Kodieren', 'mode.decode': 'Dekodieren', 'mode.parse': 'Zerlegen', 'aria.mode': 'Modus',
+      'opt.scope': 'Umfang', 'opt.comp': 'Komponente', 'opt.full': 'Ganze URL',
+      'tip.scope': 'Komponente: encodeURIComponent maskiert alle reservierten Zeichen – ideal für einzelne Parameterwerte. Ganze URL: encodeURI behält Strukturzeichen wie : / ? # & = bei',
+      'opt.plus': 'Leerzeichen als +', 'tip.plus': 'Beim Kodieren Leerzeichen als + schreiben (application/x-www-form-urlencoded). Beim Dekodieren + als Leerzeichen behandeln',
+      'opt.lines': 'Zeilenweise', 'tip.lines': 'Jede Zeile einzeln kodieren bzw. dekodieren, Zeilenumbrüche bleiben erhalten',
+      'tip.sample': 'Beispiel für den aktuellen Modus laden', 'btn.swap': 'Tauschen', 'tip.swap': 'Ausgabe als neue Eingabe verwenden und Kodieren / Dekodieren umschalten (im Modus Zerlegen nicht verfügbar)',
+      'tip.clear': 'Eingabe leeren', 'btn.copyOut': 'Ergebnis kopieren', 'tip.copyOut': 'Kopiert das Ergebnis rechts; im Modus Zerlegen die ganze Tabelle (tabulatorgetrennt)',
+      'pane.input': 'Eingabe', 'pane.output': 'Ausgabe', 'pane.parsed': 'Analyseergebnis',
+      'ph.encode': 'Text zum Kodieren eingeben, z. B. a=Grüße & b=1…', 'ph.decode': 'Text zum Dekodieren einfügen, z. B. Gr%C3%BC%C3%9Fe…',
+      'ph.parse': 'Link einfügen, z. B. https://example.com/path?a=1#top…',
+      'meta.chars': '{0} Zeichen', 'meta.params': 'Parameter: {0}',
+      'badge.idle': 'Wartet', 'badge.ok': 'Fertig', 'badge.err': 'Fehler',
+      'msg.encoded': 'Kodiert: {0} → {1} Zeichen', 'msg.decoded': 'Dekodiert: {0} → {1} Zeichen', 'msg.byLine': ' (zeilenweise, {0} Zeilen)',
+      'msg.parsed': 'Erfolgreich zerlegt · Query-Parameter: {0}',
+      'note.assumed': 'Kein Schema angegeben – als https:// interpretiert', 'note.firstLine': 'Mehrere Zeilen eingegeben – nur die erste nicht leere Zeile wurde zerlegt',
+      'pos.char': 'bei Zeichen {0}', 'pos.lineCol': 'in Zeile {0}, Spalte {1}',
+      'err.badEsc': 'Ungültige Escape-Sequenz „{1}“ {0}: Auf % müssen zwei Hexadezimalziffern folgen',
+      'err.badUtf8': 'Unvollständige oder ungültige UTF-8-Sequenz „{1}“ {0}',
+      'err.surrogate': 'Einzelnes Surrogat ({1}) {0} lässt sich nicht als UTF-8 kodieren',
+      'err.url': 'Zerlegen nicht möglich: keine gültige URL',
+      'sec.parts': 'Bestandteile', 'sec.params': 'Query-Parameter ({0})',
+      'f.href': 'Vollständiger Link', 'f.protocol': 'Protokoll', 'f.username': 'Benutzername', 'f.password': 'Passwort', 'f.hostname': 'Hostname', 'f.port': 'Port',
+      'f.origin': 'Origin', 'f.pathname': 'Pfad', 'f.pathDec': 'Pfad (dekodiert)', 'f.search': 'Query-String', 'f.hash': 'Fragment', 'f.hashDec': 'Fragment (dekodiert)',
+      'v.none': '(keiner)', 'v.empty': '(leer)', 'v.defPort': '{0} (Standard)', 'v.badDec': '(enthält nicht dekodierbare Escapes; unverändert angezeigt)',
+      'col.key': 'Schlüssel', 'col.value': 'Wert', 'btn.copyJson': 'Als JSON kopieren', 'tip.copyJson': 'Parameter als JSON-Objekt kopieren; wiederholte Schlüssel werden zu Arrays',
+      'tip.copyRow': 'Diesen Wert kopieren', 'params.none': 'Keine Query-Parameter'
+    }
+  };
+
+  const SAMPLE_TEXT = 'q=你好 世界&tag=C#/C++?page=1';
+  const SAMPLE_URL = 'https://user:p%40ss@www.example.com:8443/文档/报告 2024.pdf?q=%E4%BD%A0%E5%A5%BD+world&tag=a&tag=b&empty=&redirect=https%3A%2F%2Fexample.org%2F%3Fx%3D1#第二节';
+  const DEFAULT_PORTS = { 'http:': '80', 'https:': '443', 'ws:': '80', 'wss:': '443', 'ftp:': '21' };
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  const $ = (id) => document.getElementById(id);
+  const input = $('input'), output = $('output'), view = $('parseView');
+
+  let mode = 'encode';
+  // text：“复制结果”的内容；params：解析出的查询参数
+  let result = { text: '', params: [] };
+  let timer = null;
+
+  const page = Toolbox.initPage({ current: 'url', text: TEXT, onLang: render });
+  const tr = page.tr;
+
+  const cpLen = (s) => s.length - (s.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g) || []).length;
+  const fmtN = (n) => n.toLocaleString();
+
+  function setStatus(kind, message, badgeKey) {
+    const badge = $('badge');
+    badge.className = 'badge ' + kind;
+    badge.textContent = tr(badgeKey || 'badge.' + kind);
+    const msg = $('msg');
+    msg.className = 'status-msg' + (kind === 'err' ? ' error' : kind === 'warn' ? ' note' : '');
+    msg.textContent = message || '';
+  }
+
+  // 位置按字符（码点）从 1 计；多行输入时给出行列
+  function posLabel(text, index) {
+    const before = text.slice(0, index);
+    const line = before.split('\n').length;
+    if (!text.includes('\n')) return tr('pos.char', cpLen(before) + 1);
+    return tr('pos.lineCol', line, cpLen(before.slice(before.lastIndexOf('\n') + 1)) + 1);
+  }
+
+  const hexUpper = (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase();
+
+  function encodeOne(s, full, plus) {
+    if (full) return plus ? encodeURI(s).replace(/%20/g, '+') : encodeURI(s);
+    const out = encodeURIComponent(s);
+    // 表单格式与 URLSearchParams 一致：还要转义 !'()~
+    return plus ? out.replace(/%20/g, '+').replace(/[!'()~]/g, hexUpper) : out;
+  }
+
+  function byteAt(s, i) {
+    const pair = s.substr(i + 1, 2);
+    return s[i] === '%' && /^[0-9A-Fa-f]{2}$/.test(pair) ? parseInt(pair, 16) : -1;
+  }
+
+  function utf8Need(b) {
+    if (b < 0x80) return 0;
+    if (b >= 0xC2 && b <= 0xDF) return 1;
+    if (b >= 0xE0 && b <= 0xEF) return 2;
+    if (b >= 0xF0 && b <= 0xF4) return 3;
+    return -1;
+  }
+
+  // 第二字节的合法范围用于排除超长编码、代理区和超出 U+10FFFF 的码点
+  function secondRange(b) {
+    if (b === 0xE0) return [0xA0, 0xBF];
+    if (b === 0xED) return [0x80, 0x9F];
+    if (b === 0xF0) return [0x90, 0xBF];
+    if (b === 0xF4) return [0x80, 0x8F];
+    return [0x80, 0xBF];
+  }
+
+  // 与 decodeURIComponent 的判定一致，但能指出第一个出错的转义
+  function findBadEscape(s) {
+    for (let i = s.indexOf('%'); i !== -1; i = s.indexOf('%', i)) {
+      const b = byteAt(s, i);
+      if (b < 0) return { index: i, snippet: s.slice(i, i + 3).split(/\s/)[0], key: 'err.badEsc' };
+      const need = utf8Need(b);
+      let end = i + 3, ok = need >= 0;
+      for (let k = 1; ok && k <= need; k++) {
+        const c = byteAt(s, end);
+        const [lo, hi] = k === 1 ? secondRange(b) : [0x80, 0xBF];
+        if (c < 0) { ok = false; break; }
+        end += 3;
+        ok = c >= lo && c <= hi;
+      }
+      if (!ok) return { index: i, snippet: s.slice(i, end), key: 'err.badUtf8' };
+      i = end;
+    }
+    return null;
+  }
+
+  function convert(text) {
+    const lines = $('optLines').checked;
+    const plus = $('optPlus').checked;
+    if (mode === 'encode') {
+      const bad = LONE_SURROGATE.exec(text);
+      if (bad) return { error: tr('err.surrogate', posLabel(text, bad.index), 'U+' + bad[0].charCodeAt(0).toString(16).toUpperCase()) };
+      const full = $('optScope').value === 'full';
+      const one = (s) => encodeOne(s, full, plus);
+      return { text: lines ? text.split('\n').map(one).join('\n') : one(text) };
+    }
+    const src = plus ? text.replace(/\+/g, ' ') : text;
+    const bad = findBadEscape(src);
+    if (bad) return { error: tr(bad.key, posLabel(text, bad.index), bad.snippet) };
+    return { text: lines ? src.split('\n').map(decodeURIComponent).join('\n') : decodeURIComponent(src) };
+  }
+
+  function runConvert() {
+    const text = input.value;
+    output.value = '';
+    $('outMeta').textContent = '';
+    if (!text) { setStatus('idle'); return; }
+    let res;
+    try {
+      res = convert(text);
+    } catch (e) {
+      res = { error: String(e && e.message || e) };
+    }
+    if (res.error) { setStatus('err', res.error); return; }
+    result.text = res.text;
+    output.value = res.text;
+    const outLen = cpLen(res.text);
+    $('outMeta').textContent = tr('meta.chars', fmtN(outLen));
+    let message = tr(mode === 'encode' ? 'msg.encoded' : 'msg.decoded', fmtN(cpLen(text)), fmtN(outLen));
+    if ($('optLines').checked) message += tr('msg.byLine', fmtN(text.split('\n').length));
+    setStatus('ok', message);
+  }
+
+  function tryUrl(s) {
+    try { return new URL(s); } catch (e) { return null; }
+  }
+
+  // “localhost:8080/x”“example.com:80” 也能被当成自定义协议解析，按主机:端口处理更符合直觉
+  const looksHostPort = (s) => /^[^\s/:?#@]+:\d+(?:[/?#]|$)/.test(s);
+  const hasScheme = (s) => /^[a-z][a-z0-9+.-]*:/i.test(s) && !looksHostPort(s);
+
+  function parseInput(raw) {
+    const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+    const notes = lines.length > 1 ? [tr('note.firstLine')] : [];
+    const text = lines[0];
+    let url = looksHostPort(text) ? null : tryUrl(text);
+    if (!url && !hasScheme(text)) {
+      url = tryUrl((text.startsWith('//') ? 'https:' : 'https://') + text);
+      if (url) notes.push(tr('note.assumed'));
+    }
+    return { url, notes };
+  }
+
+  function safeDecode(s) {
+    try { return { text: decodeURIComponent(s), ok: true }; } catch (e) { return { text: s, ok: false }; }
+  }
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  const muted = (text) => el('span', 'muted', text);
+  const valueNode = (s, emptyKey) => (s ? document.createTextNode(s) : muted(tr(emptyKey || 'v.none')));
+
+  function decodedNode(s) {
+    if (!s) return muted(tr('v.none'));
+    const dec = safeDecode(s);
+    if (dec.ok) return document.createTextNode(dec.text);
+    const frag = document.createDocumentFragment();
+    frag.append(s, ' ', muted(tr('v.badDec')));
+    return frag;
+  }
+
+  function componentRows(url) {
+    const def = DEFAULT_PORTS[url.protocol];
+    const port = url.port ? document.createTextNode(url.port) : muted(def ? tr('v.defPort', def) : tr('v.none'));
+    return [
+      ['f.href', url.href, valueNode(url.href)],
+      ['f.protocol', url.protocol, valueNode(url.protocol)],
+      ['f.username', url.username, valueNode(url.username)],
+      ['f.password', url.password, valueNode(url.password)],
+      ['f.hostname', url.hostname, valueNode(url.hostname)],
+      ['f.port', url.port || def || '', port],
+      ['f.origin', url.origin, valueNode(url.origin)],
+      ['f.pathname', url.pathname, valueNode(url.pathname)],
+      ['f.pathDec', safeDecode(url.pathname).text, decodedNode(url.pathname)],
+      ['f.search', url.search, valueNode(url.search)],
+      ['f.hash', url.hash, valueNode(url.hash)],
+      ['f.hashDec', safeDecode(url.hash).text, decodedNode(url.hash)]
+    ];
+  }
+
+  function paramsTable(params) {
+    const table = el('table', 'ptable');
+    const head = table.createTHead().insertRow();
+    ['#', tr('col.key'), tr('col.value'), ''].forEach((t) => head.appendChild(el('th', '', t)));
+    const body = table.createTBody();
+    params.forEach(([key, value], i) => {
+      const row = body.insertRow();
+      row.appendChild(el('td', 'n', String(i + 1)));
+      row.appendChild(el('td', 'k')).appendChild(valueNode(key, 'v.empty'));
+      row.appendChild(el('td', 'v')).appendChild(valueNode(value, 'v.empty'));
+      const btn = el('button', 'mini', tr('btn.copy'));
+      btn.type = 'button';
+      btn.title = tr('tip.copyRow');
+      btn.disabled = !value;
+      btn.addEventListener('click', () => page.copy(value));
+      row.appendChild(el('td', 'act')).appendChild(btn);
+    });
+    return table;
+  }
+
+  // 手工拼接以保留参数首次出现的顺序（普通对象会把数字键排到前面）
+  function paramsJson(params) {
+    const groups = new Map();
+    params.forEach(([k, v]) => groups.set(k, groups.has(k) ? [].concat(groups.get(k), v) : v));
+    if (!groups.size) return '{}';
+    const body = [...groups].map(([k, v]) => '  ' + JSON.stringify(k) + ': ' + JSON.stringify(v, null, 2).replace(/\n/g, '\n  '));
+    return '{\n' + body.join(',\n') + '\n}';
+  }
+
+  function sectionHead(text, button) {
+    const h = el('h3');
+    h.appendChild(el('span', '', text));
+    if (button) h.appendChild(button);
+    return h;
+  }
+
+  function runParse() {
+    view.replaceChildren();
+    $('outMeta').textContent = '';
+    if (!input.value.trim()) { setStatus('idle'); return; }
+    const { url, notes } = parseInput(input.value);
+    notes.forEach((n) => view.appendChild(el('p', 'note', n)));
+    if (!url) { setStatus('err', tr('err.url')); return; }
+
+    const rows = componentRows(url);
+    const params = [...url.searchParams];
+    view.appendChild(sectionHead(tr('sec.parts')));
+    const kv = el('table', 'kv');
+    rows.forEach(([key, , node]) => {
+      const row = kv.insertRow();
+      row.appendChild(el('th', '', tr(key)));
+      row.appendChild(el('td')).appendChild(node);
+    });
+    view.appendChild(kv);
+
+    const jsonBtn = el('button', 'mini', tr('btn.copyJson'));
+    jsonBtn.type = 'button';
+    jsonBtn.title = tr('tip.copyJson');
+    jsonBtn.disabled = !params.length;
+    jsonBtn.addEventListener('click', () => page.copy(paramsJson(params)));
+    view.appendChild(sectionHead(tr('sec.params', params.length), jsonBtn));
+    view.appendChild(params.length ? paramsTable(params) : el('p', 'empty-msg', tr('params.none')));
+
+    const tsv = rows.map(([key, raw]) => tr(key) + '\t' + raw);
+    if (params.length) tsv.push('', '#\t' + tr('col.key') + '\t' + tr('col.value'), ...params.map(([k, v], i) => (i + 1) + '\t' + k + '\t' + v));
+    result = { text: tsv.join('\n'), params };
+    $('outMeta').textContent = tr('meta.params', fmtN(params.length));
+    const message = [tr('msg.parsed', fmtN(params.length))].concat(notes).join(' · ');
+    setStatus(notes.length ? 'warn' : 'ok', message, 'badge.ok');
+  }
+
+  function render() {
+    const parse = mode === 'parse';
+    ['Encode', 'Decode', 'Parse'].forEach((m) => $('mode' + m).setAttribute('aria-pressed', String(mode === m.toLowerCase())));
+    input.placeholder = tr('ph.' + mode);
+    $('optScope').disabled = mode !== 'encode';
+    $('optPlus').disabled = $('optLines').disabled = $('btnSwap').disabled = parse;
+    output.hidden = parse;
+    view.hidden = !parse;
+    $('outLabel').textContent = tr(parse ? 'pane.parsed' : 'pane.output');
+    $('inMeta').textContent = input.value ? tr('meta.chars', fmtN(cpLen(input.value))) : '';
+    result = { text: '', params: [] };
+    if (parse) runParse();
+    else runConvert();
+  }
+
+  function setMode(next) {
+    if (mode === next) return;
+    mode = next;
+    render();
+  }
+
+  function sampleFor(m) {
+    if (m === 'parse') return SAMPLE_URL;
+    if (m === 'decode') return encodeOne(SAMPLE_TEXT, false, $('optPlus').checked);
+    return SAMPLE_TEXT;
+  }
+
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(render, 120); });
+  document.querySelectorAll('.seg button[data-mode]').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  ['optScope', 'optPlus', 'optLines'].forEach((id) => $(id).addEventListener('change', render));
+  $('btnSample').addEventListener('click', () => { input.value = sampleFor(mode); render(); });
+  $('btnSwap').addEventListener('click', () => {
+    if (!result.text) { page.toast(tr('toast.empty')); return; }
+    input.value = result.text;
+    mode = mode === 'encode' ? 'decode' : 'encode';
+    render();
+  });
+  $('btnClear').addEventListener('click', () => {
+    input.value = '';
+    render();
+    input.focus();
+    page.toast(tr('toast.cleared'));
+  });
+  $('btnCopy').addEventListener('click', () => page.copy(result.text));
+
+  render();
+})();
+</script>
+</body>
+</html>

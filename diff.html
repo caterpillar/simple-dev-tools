@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文本对比</title>
+<meta name="description" content="本地离线文本对比：逐行比较两段文本，支持并排 / 合并视图、行内差异高亮、忽略空白与大小写，并可导出 unified diff。">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="toolbox.css">
+<script src="toolbox-nav.js"></script>
+<style>
+  .diff-main {
+    flex: 1 1 auto; min-height: 0;
+    display: grid; grid-template-rows: minmax(120px, 38fr) minmax(0, 62fr);
+    gap: 1px; background: var(--border);
+  }
+  .diff-main > .workspace { min-height: 0; }
+  @media (max-width: 900px) {
+    .diff-main { grid-template-rows: minmax(220px, 50fr) minmax(160px, 50fr); }
+  }
+  .stat-add { color: var(--ok); }
+  .stat-del { color: var(--err); margin-left: 8px; }
+
+  .diff-out {
+    --lnw: calc(2ch + 14px);
+    min-height: 100%;
+    font-family: var(--mono); font-size: var(--ed-font-size); line-height: var(--ed-line-height);
+  }
+  .diff-out .chunk { content-visibility: auto; contain-intrinsic-size: auto calc(var(--rows) * var(--ed-line-height)); }
+  .diff-out .r { display: grid; grid-template-columns: var(--lnw) minmax(0, 1fr) var(--lnw) minmax(0, 1fr); }
+  .diff-out.unified .r { grid-template-columns: var(--lnw) var(--lnw) 2ch minmax(0, 1fr); }
+  .diff-out .ln { padding: 0 8px 0 4px; text-align: right; color: var(--ln); user-select: none; }
+  .diff-out .tx {
+    min-width: 0; min-height: var(--ed-line-height); padding: 0 10px;
+    white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; tab-size: 2;
+  }
+  .diff-out .mid { border-left: 1px solid var(--border); }
+  .diff-out .mk { text-align: center; user-select: none; }
+  .diff-out .del { background: var(--del-bg); }
+  .diff-out .add { background: var(--add-bg); }
+  .diff-out .mk.del { color: var(--err); }
+  .diff-out .mk.add { color: var(--ok); }
+  .diff-out .del .hl { background: var(--del-hl); border-radius: 2px; }
+  .diff-out .add .hl { background: var(--add-hl); border-radius: 2px; }
+  .diff-out .none {
+    background: var(--panel) repeating-linear-gradient(-45deg, transparent 0 6px, color-mix(in srgb, var(--border) 55%, transparent) 6px 7px);
+  }
+  .diff-out button.fold {
+    display: block; width: 100%; height: auto;
+    padding: 2px 12px; text-align: left;
+    font: inherit; font-size: 12px; line-height: 1.6;
+    color: var(--muted); background: var(--panel);
+    border: 0; border-block: 1px solid var(--border); border-radius: 0;
+  }
+  .diff-out button.fold:hover { color: var(--accent); background: var(--hover); }
+  .diff-out button.fold:active { transform: none; }
+  .diff-out .more { padding: 6px 12px; color: var(--warn); background: var(--panel); border-top: 1px solid var(--border); }
+  .diff-out.msg { padding: 10px 12px; font-family: inherit; font-size: 13px; color: var(--placeholder); }
+  .diff-out.msg.same { color: var(--ok); }
+</style>
+</head>
+<body>
+<header class="titlebar">
+  <nav class="tool-tabs" id="toolTabs" data-current="diff"></nav>
+  <div class="titlebar-right" id="toolboxControls"></div>
+</header>
+
+<div class="toolbar">
+  <span class="tb-label" data-i18n="view.label">视图</span>
+  <span class="seg" role="group" data-i18n-aria="aria.view">
+    <button type="button" id="viewSplit" data-view="split" aria-pressed="true" data-i18n="view.split" data-i18n-title="tip.split">并排</button>
+    <button type="button" id="viewUnified" data-view="unified" aria-pressed="false" data-i18n="view.unified" data-i18n-title="tip.unified">合并</button>
+  </span>
+  <label class="chk" data-i18n-title="tip.ws"><input type="checkbox" id="optWs"><span data-i18n="opt.ws">忽略空白</span></label>
+  <label class="chk" data-i18n-title="tip.case"><input type="checkbox" id="optCase"><span data-i18n="opt.case">忽略大小写</span></label>
+  <label class="chk" data-i18n-title="tip.only"><input type="checkbox" id="optOnly"><span data-i18n="opt.only">仅显示改动</span></label>
+  <span class="tb-sep"></span>
+  <button type="button" id="btnSwap" data-i18n="btn.swap" data-i18n-title="tip.swap">交换</button>
+  <button type="button" id="btnSample" data-i18n="btn.sample" data-i18n-title="tip.sample">示例</button>
+  <button type="button" id="btnClear" data-i18n="btn.clear" data-i18n-title="tip.clear">清空</button>
+  <span class="tb-sep"></span>
+  <button type="button" id="btnCopy" data-i18n="btn.copyDiff" data-i18n-title="tip.copyDiff">复制差异</button>
+  <button type="button" id="btnDownload" data-i18n="btn.dlDiff" data-i18n-title="tip.dlDiff">下载差异</button>
+</div>
+
+<main class="diff-main">
+  <div class="workspace">
+    <section class="pane">
+      <div class="pane-head"><span data-i18n="pane.old">原文本</span><span class="meta" id="oldMeta"></span></div>
+      <div class="pane-body">
+        <textarea class="code" id="left" spellcheck="false" autocomplete="off" data-i18n-ph="ph.old" data-i18n-aria="pane.old"></textarea>
+      </div>
+    </section>
+    <section class="pane">
+      <div class="pane-head"><span data-i18n="pane.new">新文本</span><span class="meta" id="newMeta"></span></div>
+      <div class="pane-body">
+        <textarea class="code" id="right" spellcheck="false" autocomplete="off" data-i18n-ph="ph.new" data-i18n-aria="pane.new"></textarea>
+      </div>
+    </section>
+  </div>
+  <section class="pane">
+    <div class="pane-head"><span data-i18n="pane.result">对比结果</span><span class="meta" id="stats"></span></div>
+    <div class="pane-body">
+      <div class="diff-out" id="result" data-i18n-aria="pane.result"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="status">
+  <span class="badge idle" id="badge"></span>
+  <span class="status-msg" id="msg"></span>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  const TEXT = {
+    'zh-CN': {
+      'view.label': '视图', 'aria.view': '视图', 'view.split': '并排', 'view.unified': '合并',
+      'tip.split': '左右并排显示原文本和新文本', 'tip.unified': '在同一列中用 − / + 标出改动',
+      'opt.ws': '忽略空白', 'tip.ws': '比较时去掉行首尾空白，并把连续空白视为一个空格',
+      'opt.case': '忽略大小写', 'tip.case': '比较时不区分字母大小写',
+      'opt.only': '仅显示改动', 'tip.only': '折叠未改变的内容，只保留改动前后各 3 行',
+      'btn.swap': '交换', 'tip.swap': '交换原文本和新文本',
+      'tip.sample': '载入一组示例配置', 'tip.clear': '清空两侧文本',
+      'btn.copyDiff': '复制差异', 'tip.copyDiff': '复制为统一差异格式（unified diff），可用于 patch 或 git apply',
+      'btn.dlDiff': '下载差异', 'tip.dlDiff': '下载为 .diff 文件',
+      'pane.old': '原文本', 'pane.new': '新文本', 'pane.result': '对比结果',
+      'ph.old': '粘贴或输入原文本…', 'ph.new': '粘贴或输入修改后的文本…',
+      'meta.lines': '{0} 行', 'tip.stats': '新增 / 删除的行数',
+      'res.empty': '在上方分别输入原文本和新文本，差异会实时显示在这里',
+      'res.same': '两段文本完全相同', 'res.sameIgnored': '忽略空白或大小写后，两段文本相同',
+      'res.fold': '… 展开 {0} 行未改变', 'res.more': '… 仅显示前 {0} 行，其余内容未显示',
+      'badge.idle': '待输入', 'badge.diff': '有差异', 'badge.same': '相同',
+      'msg.diff': '{0} 处改动：新增 {1} 行，删除 {2} 行，修改 {3} 行',
+      'msg.fallback': '差异过大，中间部分按整块删除 / 新增显示',
+      'msg.truncated': '结果过长，只显示前 {0} 行；复制和下载的是完整差异',
+      'toast.noDiff': '没有差异'
+    },
+    'zh-TW': {
+      'view.label': '檢視', 'aria.view': '檢視', 'view.split': '並排', 'view.unified': '合併',
+      'tip.split': '左右並排顯示原文字與新文字', 'tip.unified': '在同一欄中以 − / + 標示變更',
+      'opt.ws': '忽略空白', 'tip.ws': '比較時去除行首尾空白，並將連續空白視為一個空格',
+      'opt.case': '忽略大小寫', 'tip.case': '比較時不區分字母大小寫',
+      'opt.only': '僅顯示變更', 'tip.only': '摺疊未變更的內容，只保留變更前後各 3 行',
+      'btn.swap': '交換', 'tip.swap': '交換原文字與新文字',
+      'tip.sample': '載入一組範例設定', 'tip.clear': '清空兩側文字',
+      'btn.copyDiff': '複製差異', 'tip.copyDiff': '複製為統一差異格式（unified diff），可用於 patch 或 git apply',
+      'btn.dlDiff': '下載差異', 'tip.dlDiff': '下載為 .diff 檔案',
+      'pane.old': '原文字', 'pane.new': '新文字', 'pane.result': '比對結果',
+      'ph.old': '貼上或輸入原文字…', 'ph.new': '貼上或輸入修改後的文字…',
+      'meta.lines': '{0} 行', 'tip.stats': '新增 / 刪除的行數',
+      'res.empty': '在上方分別輸入原文字與新文字，差異會即時顯示在這裡',
+      'res.same': '兩段文字完全相同', 'res.sameIgnored': '忽略空白或大小寫後，兩段文字相同',
+      'res.fold': '… 展開 {0} 行未變更', 'res.more': '… 僅顯示前 {0} 行，其餘內容未顯示',
+      'badge.idle': '待輸入', 'badge.diff': '有差異', 'badge.same': '相同',
+      'msg.diff': '{0} 處變更：新增 {1} 行，刪除 {2} 行，修改 {3} 行',
+      'msg.fallback': '差異過大，中間部分以整塊刪除 / 新增顯示',
+      'msg.truncated': '結果過長，只顯示前 {0} 行；複製與下載的是完整差異',
+      'toast.noDiff': '沒有差異'
+    },
+    en: {
+      'view.label': 'View', 'aria.view': 'View', 'view.split': 'Split', 'view.unified': 'Unified',
+      'tip.split': 'Show the original and changed text side by side', 'tip.unified': 'Show changes in one column, marked with − / +',
+      'opt.ws': 'Ignore whitespace', 'tip.ws': 'Trim each line and treat runs of whitespace as one space when comparing',
+      'opt.case': 'Ignore case', 'tip.case': 'Compare letters without regard to case',
+      'opt.only': 'Changes only', 'tip.only': 'Collapse unchanged lines, keeping 3 lines of context around each change',
+      'btn.swap': 'Swap', 'tip.swap': 'Swap the original and changed text',
+      'tip.sample': 'Load a sample pair of config files', 'tip.clear': 'Clear both texts',
+      'btn.copyDiff': 'Copy diff', 'tip.copyDiff': 'Copy as a unified diff, usable with patch or git apply',
+      'btn.dlDiff': 'Download diff', 'tip.dlDiff': 'Save as a .diff file',
+      'pane.old': 'Original', 'pane.new': 'Changed', 'pane.result': 'Result',
+      'ph.old': 'Paste or type the original text…', 'ph.new': 'Paste or type the changed text…',
+      'meta.lines': 'Lines: {0}', 'tip.stats': 'Lines added / removed',
+      'res.empty': 'Enter the original and changed text above — differences show up here as you type',
+      'res.same': 'The two texts are identical', 'res.sameIgnored': 'The texts are identical when whitespace or case is ignored',
+      'res.fold': '… Expand unchanged lines ({0})', 'res.more': '… Only the first {0} rows are shown',
+      'badge.idle': 'Waiting', 'badge.diff': 'Different', 'badge.same': 'Identical',
+      'msg.diff': 'Changes: {0} · lines added {1} · removed {2} · modified {3}',
+      'msg.fallback': 'Too many differences: the middle section is shown as one removed / added block',
+      'msg.truncated': 'Large result: only the first {0} rows are shown. Copy and download contain the full diff',
+      'toast.noDiff': 'No differences'
+    },
+    ja: {
+      'view.label': '表示', 'aria.view': '表示', 'view.split': '左右', 'view.unified': '統合',
+      'tip.split': '元のテキストと新しいテキストを左右に並べて表示', 'tip.unified': '変更を 1 列にまとめ、− / + を付けて表示',
+      'opt.ws': '空白を無視', 'tip.ws': '比較時に行頭・行末の空白を除き、連続する空白を 1 つの空白として扱います',
+      'opt.case': '大文字小文字を無視', 'tip.case': '英字の大文字と小文字を区別せずに比較します',
+      'opt.only': '変更のみ', 'tip.only': '変更のない部分を折りたたみ、変更の前後 3 行だけを残します',
+      'btn.swap': '入れ替え', 'tip.swap': '元のテキストと新しいテキストを入れ替えます',
+      'tip.sample': 'サンプルの設定ファイルを読み込む', 'tip.clear': '両方のテキストをクリア',
+      'btn.copyDiff': '差分をコピー', 'tip.copyDiff': 'unified diff 形式でコピー（patch や git apply で利用可能）',
+      'btn.dlDiff': '差分を保存', 'tip.dlDiff': '.diff ファイルとして保存',
+      'pane.old': '元のテキスト', 'pane.new': '新しいテキスト', 'pane.result': '比較結果',
+      'ph.old': '元のテキストを貼り付けまたは入力…', 'ph.new': '変更後のテキストを貼り付けまたは入力…',
+      'meta.lines': '{0} 行', 'tip.stats': '追加 / 削除された行数',
+      'res.empty': '上に元のテキストと新しいテキストを入力すると、差分がここにすぐ表示されます',
+      'res.same': '2 つのテキストは完全に同じです', 'res.sameIgnored': '空白または大文字小文字を無視すると、2 つのテキストは同じです',
+      'res.fold': '… 変更のない {0} 行を展開', 'res.more': '… 先頭 {0} 行のみ表示しています',
+      'badge.idle': '入力待ち', 'badge.diff': '差分あり', 'badge.same': '同一',
+      'msg.diff': '{0} か所の変更：追加 {1} 行、削除 {2} 行、変更 {3} 行',
+      'msg.fallback': '差分が多すぎるため、中間部分を 1 つの削除 / 追加ブロックとして表示しています',
+      'msg.truncated': '結果が大きいため先頭 {0} 行のみ表示しています。コピーと保存は差分全体が対象です',
+      'toast.noDiff': '差分はありません'
+    },
+    ko: {
+      'view.label': '보기', 'aria.view': '보기', 'view.split': '나란히', 'view.unified': '통합',
+      'tip.split': '원본과 새 텍스트를 좌우로 나란히 표시', 'tip.unified': '변경 내용을 한 열에 − / + 로 표시',
+      'opt.ws': '공백 무시', 'tip.ws': '비교할 때 줄 앞뒤 공백을 없애고 연속된 공백을 하나로 취급합니다',
+      'opt.case': '대소문자 무시', 'tip.case': '영문 대소문자를 구분하지 않고 비교합니다',
+      'opt.only': '변경만 보기', 'tip.only': '바뀌지 않은 부분을 접고 변경 앞뒤 3줄만 남깁니다',
+      'btn.swap': '바꾸기', 'tip.swap': '원본과 새 텍스트를 서로 바꿉니다',
+      'tip.sample': '예시 설정 파일 불러오기', 'tip.clear': '양쪽 텍스트 지우기',
+      'btn.copyDiff': '차이 복사', 'tip.copyDiff': 'unified diff 형식으로 복사 (patch 나 git apply 에 사용 가능)',
+      'btn.dlDiff': '차이 저장', 'tip.dlDiff': '.diff 파일로 저장',
+      'pane.old': '원본 텍스트', 'pane.new': '새 텍스트', 'pane.result': '비교 결과',
+      'ph.old': '원본 텍스트를 붙여 넣거나 입력하세요…', 'ph.new': '수정된 텍스트를 붙여 넣거나 입력하세요…',
+      'meta.lines': '{0}줄', 'tip.stats': '추가 / 삭제된 줄 수',
+      'res.empty': '위에 원본과 새 텍스트를 입력하면 차이가 여기에 바로 표시됩니다',
+      'res.same': '두 텍스트가 완전히 같습니다', 'res.sameIgnored': '공백이나 대소문자를 무시하면 두 텍스트가 같습니다',
+      'res.fold': '… 바뀌지 않은 {0}줄 펼치기', 'res.more': '… 처음 {0}줄만 표시합니다',
+      'badge.idle': '입력 대기', 'badge.diff': '차이 있음', 'badge.same': '동일',
+      'msg.diff': '변경 {0}곳: 추가 {1}줄, 삭제 {2}줄, 수정 {3}줄',
+      'msg.fallback': '차이가 너무 많아 가운데 부분을 하나의 삭제 / 추가 블록으로 표시합니다',
+      'msg.truncated': '결과가 커서 처음 {0}줄만 표시합니다. 복사와 저장은 전체 차이가 대상입니다',
+      'toast.noDiff': '차이가 없습니다'
+    },
+    es: {
+      'view.label': 'Vista', 'aria.view': 'Vista', 'view.split': 'En paralelo', 'view.unified': 'Unificada',
+      'tip.split': 'Muestra el texto original y el nuevo uno junto al otro', 'tip.unified': 'Muestra los cambios en una sola columna, marcados con − / +',
+      'opt.ws': 'Ignorar espacios', 'tip.ws': 'Al comparar, recorta cada línea y trata los espacios seguidos como uno solo',
+      'opt.case': 'Ignorar mayúsculas', 'tip.case': 'Compara sin distinguir mayúsculas de minúsculas',
+      'opt.only': 'Solo cambios', 'tip.only': 'Pliega lo que no cambia y deja 3 líneas de contexto alrededor de cada cambio',
+      'btn.swap': 'Intercambiar', 'tip.swap': 'Intercambia el texto original y el nuevo',
+      'tip.sample': 'Cargar un par de configuraciones de ejemplo', 'tip.clear': 'Vaciar ambos textos',
+      'btn.copyDiff': 'Copiar diff', 'tip.copyDiff': 'Copia en formato unified diff, útil con patch o git apply',
+      'btn.dlDiff': 'Descargar diff', 'tip.dlDiff': 'Guarda un archivo .diff',
+      'pane.old': 'Original', 'pane.new': 'Nuevo', 'pane.result': 'Resultado',
+      'ph.old': 'Pega o escribe el texto original…', 'ph.new': 'Pega o escribe el texto modificado…',
+      'meta.lines': 'Líneas: {0}', 'tip.stats': 'Líneas añadidas / eliminadas',
+      'res.empty': 'Escribe arriba el texto original y el nuevo; las diferencias aparecerán aquí al instante',
+      'res.same': 'Los dos textos son idénticos', 'res.sameIgnored': 'Los textos son idénticos si se ignoran los espacios o las mayúsculas',
+      'res.fold': '… Mostrar líneas sin cambios ({0})', 'res.more': '… Solo se muestran las primeras {0} filas',
+      'badge.idle': 'En espera', 'badge.diff': 'Con cambios', 'badge.same': 'Idénticos',
+      'msg.diff': 'Cambios: {0} · líneas añadidas {1} · eliminadas {2} · modificadas {3}',
+      'msg.fallback': 'Demasiadas diferencias: la parte central se muestra como un único bloque eliminado / añadido',
+      'msg.truncated': 'Resultado grande: solo se muestran las primeras {0} filas. Copiar y descargar incluyen el diff completo',
+      'toast.noDiff': 'No hay diferencias'
+    },
+    fr: {
+      'view.label': 'Affichage', 'aria.view': 'Affichage', 'view.split': 'Côte à côte', 'view.unified': 'Unifié',
+      'tip.split': 'Affiche le texte original et le nouveau côte à côte', 'tip.unified': 'Affiche les modifications dans une seule colonne, marquées − / +',
+      'opt.ws': 'Ignorer les espaces', 'tip.ws': 'Pour comparer, supprime les espaces en début et fin de ligne et traite les espaces consécutifs comme un seul',
+      'opt.case': 'Ignorer la casse', 'tip.case': 'Compare sans distinguer majuscules et minuscules',
+      'opt.only': 'Modifs uniquement', 'tip.only': 'Replie les parties inchangées en gardant 3 lignes de contexte autour de chaque modification',
+      'btn.swap': 'Inverser', 'tip.swap': 'Échange le texte original et le nouveau',
+      'tip.sample': 'Charger un exemple de configuration', 'tip.clear': 'Effacer les deux textes',
+      'btn.copyDiff': 'Copier le diff', 'tip.copyDiff': 'Copie au format unified diff, utilisable avec patch ou git apply',
+      'btn.dlDiff': 'Télécharger le diff', 'tip.dlDiff': 'Enregistre un fichier .diff',
+      'pane.old': 'Original', 'pane.new': 'Nouveau', 'pane.result': 'Résultat',
+      'ph.old': 'Collez ou saisissez le texte original…', 'ph.new': 'Collez ou saisissez le texte modifié…',
+      'meta.lines': 'Lignes : {0}', 'tip.stats': 'Lignes ajoutées / supprimées',
+      'res.empty': 'Saisissez ci-dessus le texte original et le nouveau : les différences s’affichent ici en direct',
+      'res.same': 'Les deux textes sont identiques', 'res.sameIgnored': 'Les textes sont identiques en ignorant les espaces ou la casse',
+      'res.fold': '… Afficher les lignes inchangées ({0})', 'res.more': '… Seules les {0} premières lignes sont affichées',
+      'badge.idle': 'En attente', 'badge.diff': 'Différents', 'badge.same': 'Identiques',
+      'msg.diff': 'Modifications : {0} · lignes ajoutées {1} · supprimées {2} · modifiées {3}',
+      'msg.fallback': 'Trop de différences : la partie centrale est affichée comme un seul bloc supprimé / ajouté',
+      'msg.truncated': 'Résultat volumineux : seules les {0} premières lignes sont affichées. La copie et le téléchargement contiennent le diff complet',
+      'toast.noDiff': 'Aucune différence'
+    },
+    de: {
+      'view.label': 'Ansicht', 'aria.view': 'Ansicht', 'view.split': 'Nebeneinander', 'view.unified': 'Einheitlich',
+      'tip.split': 'Original und neuen Text nebeneinander anzeigen', 'tip.unified': 'Änderungen in einer Spalte mit − / + anzeigen',
+      'opt.ws': 'Leerraum ignorieren', 'tip.ws': 'Beim Vergleich Zeilen trimmen und mehrere Leerzeichen als eines behandeln',
+      'opt.case': 'Groß/klein ignorieren', 'tip.case': 'Groß- und Kleinschreibung beim Vergleich nicht unterscheiden',
+      'opt.only': 'Nur Änderungen', 'tip.only': 'Unveränderte Bereiche einklappen – 3 Zeilen Kontext um jede Änderung bleiben sichtbar',
+      'btn.swap': 'Tauschen', 'tip.swap': 'Original und neuen Text vertauschen',
+      'tip.sample': 'Beispielkonfiguration laden', 'tip.clear': 'Beide Texte leeren',
+      'btn.copyDiff': 'Diff kopieren', 'tip.copyDiff': 'Als Unified Diff kopieren – nutzbar mit patch oder git apply',
+      'btn.dlDiff': 'Diff speichern', 'tip.dlDiff': 'Als .diff-Datei speichern',
+      'pane.old': 'Original', 'pane.new': 'Neu', 'pane.result': 'Ergebnis',
+      'ph.old': 'Originaltext einfügen oder eingeben…', 'ph.new': 'Geänderten Text einfügen oder eingeben…',
+      'meta.lines': 'Zeilen: {0}', 'tip.stats': 'Hinzugefügte / entfernte Zeilen',
+      'res.empty': 'Oben Original und neuen Text eingeben – die Unterschiede erscheinen hier sofort',
+      'res.same': 'Beide Texte sind identisch', 'res.sameIgnored': 'Ohne Leerraum bzw. Groß-/Kleinschreibung sind die Texte identisch',
+      'res.fold': '… Unveränderte Zeilen einblenden ({0})', 'res.more': '… Nur die ersten {0} Zeilen werden angezeigt',
+      'badge.idle': 'Wartet', 'badge.diff': 'Unterschiede', 'badge.same': 'Identisch',
+      'msg.diff': 'Änderungen: {0} · Zeilen hinzugefügt {1} · entfernt {2} · geändert {3}',
+      'msg.fallback': 'Zu viele Unterschiede – der mittlere Teil wird als ein entfernter / hinzugefügter Block angezeigt',
+      'msg.truncated': 'Großes Ergebnis – nur die ersten {0} Zeilen werden angezeigt. Kopieren und Speichern enthalten den vollständigen Diff',
+      'toast.noDiff': 'Keine Unterschiede'
+    }
+  };
+
+  const SAMPLE_OLD = [
+    'server:', '  host: 0.0.0.0', '  port: 8080', '  timeout: 30s', '  workers: 4', '',
+    'database:', '  driver: postgres', '  host: db.internal', '  port: 5432', '  name: app_prod',
+    '  user: app', '  ssl: require', '  pool:', '    min: 2', '    max: 10', '',
+    'cache:', '  enabled: false', '  ttl: 300', '',
+    'logging:', '  level: debug', '  format: text', '  output: stdout', ''
+  ].join('\n');
+  const SAMPLE_NEW = [
+    'server:', '  host: 0.0.0.0', '  port: 9090', '  timeout: 60s', '  workers: 4', '  keepalive: true', '',
+    'database:', '  driver: postgres', '  host: db.internal', '  port: 5432', '  name: app_prod',
+    '  user: app', '  ssl: require', '  pool:', '    min: 2', '    max: 20', '',
+    'logging:', '  level: info', '  format: json', '  output: stdout', ''
+  ].join('\n');
+
+  const MAX_D = 4000;
+  const MAX_LINES = 100000;
+  const ROW_CAP = 20000;
+  const CTX = 3;
+  const CHAR_MAX = 2000;
+  const CHAR_D = 1000;
+  const EXPAND_STEP = 5000;
+  const CHUNK = 200;
+  const OP_EQ = 0, OP_DEL = 1, OP_INS = 2;
+
+  const $ = (id) => document.getElementById(id);
+  const left = $('left'), right = $('right'), out = $('result');
+
+  let view = 'split';
+  let state = null;
+  let timer = null;
+
+  const page = Toolbox.initPage({ current: 'diff', text: TEXT, onLang: render });
+  const tr = page.tr;
+  const fmt = (n) => n.toLocaleString();
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  // 末尾换行不算一行，与 diff / git 的行数一致
+  function splitLines(text) {
+    if (!text) return [];
+    const lines = text.replace(/\r\n?/g, '\n').split('\n');
+    if (lines[lines.length - 1] === '') lines.pop();
+    return lines;
+  }
+
+  function lineKey(line, ws, ic) {
+    const k = ws ? line.trim().replace(/\s+/g, ' ') : line;
+    return ic ? k.toLowerCase() : k;
+  }
+
+  function toIds(lists, ws, ic) {
+    const map = new Map();
+    return lists.map((lines) => {
+      const ids = new Int32Array(lines.length);
+      lines.forEach((line, i) => {
+        const key = lineKey(line, ws, ic);
+        let id = map.get(key);
+        if (id === undefined) { id = map.size; map.set(key, id); }
+        ids[i] = id;
+      });
+      return ids;
+    });
+  }
+
+  // Myers O(ND)：返回 OP_EQ / OP_DEL / OP_INS 序列；编辑距离超过 limit 时返回 null
+  function myers(a, b, limit) {
+    const n = a.length, m = b.length;
+    if (!n || !m) return new Array(n).fill(OP_DEL).concat(new Array(m).fill(OP_INS));
+    const off = n + m + 1;
+    const v = new Int32Array(2 * off + 1);
+    const trace = [];
+    for (let d = 0; d <= n + m; d++) {
+      if (d > limit) return null;
+      trace.push(v.slice(off - d - 1, off + d + 2));
+      for (let k = -d; k <= d; k += 2) {
+        let x = (k === -d || (k !== d && v[off + k - 1] < v[off + k + 1])) ? v[off + k + 1] : v[off + k - 1] + 1;
+        let y = x - k;
+        while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+        v[off + k] = x;
+        if (x >= n && y >= m) return backtrack(trace, n, m);
+      }
+    }
+    return null;
+  }
+
+  function backtrack(trace, n, m) {
+    const ops = [];
+    let x = n, y = m;
+    for (let d = trace.length - 1; d >= 0; d--) {
+      const v = trace[d], base = d + 1, k = x - y;
+      const prevK = (k === -d || (k !== d && v[base + k - 1] < v[base + k + 1])) ? k + 1 : k - 1;
+      const prevX = v[base + prevK], prevY = prevX - prevK;
+      while (x > prevX && y > prevY) { ops.push(OP_EQ); x--; y--; }
+      if (d > 0) ops.push(x === prevX ? OP_INS : OP_DEL);
+      x = prevX;
+      y = prevY;
+    }
+    return ops.reverse();
+  }
+
+  function trimCommon(a, b) {
+    let p = 0;
+    while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    let s = 0;
+    while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+    return [p, s];
+  }
+
+  // 把操作序列切成相同段（eq）和改动块（chg：一段删除紧挨一段新增）
+  function toParts(ops, p, s) {
+    const parts = [];
+    let cur = null, ai = 0, bi = 0;
+    const step = (op) => {
+      if (op === OP_EQ) {
+        if (!cur || cur.kind !== 'eq') parts.push(cur = { kind: 'eq', a0: ai, b0: bi, n: 0, rev: 0 });
+        cur.n++; ai++; bi++;
+        return;
+      }
+      if (!cur || cur.kind !== 'chg') parts.push(cur = { kind: 'chg', a0: ai, b0: bi, an: 0, bn: 0, segs: [], rough: false });
+      if (op === OP_DEL) { cur.an++; ai++; } else { cur.bn++; bi++; }
+    };
+    for (let i = 0; i < p; i++) step(OP_EQ);
+    ops.forEach(step);
+    for (let i = 0; i < s; i++) step(OP_EQ);
+    return parts;
+  }
+
+  function diffLines(aIds, bIds) {
+    const [p, s] = trimCommon(aIds, bIds);
+    const midA = aIds.subarray(p, aIds.length - s), midB = bIds.subarray(p, bIds.length - s);
+    let ops = midA.length + midB.length <= MAX_LINES ? myers(midA, midB, MAX_D) : null;
+    const fallback = !ops;
+    if (fallback) ops = new Array(midA.length).fill(OP_DEL).concat(new Array(midB.length).fill(OP_INS));
+    const parts = toParts(ops, p, s);
+    if (fallback) parts.forEach((part) => { if (part.kind === 'chg') part.rough = true; });
+    return { parts, fallback };
+  }
+
+  function segments(chars, flags) {
+    const segs = [];
+    chars.forEach((ch, i) => {
+      const last = segs[segs.length - 1];
+      if (last && last[1] === flags[i]) last[0] += ch;
+      else segs.push([ch, flags[i]]);
+    });
+    return segs;
+  }
+
+  // 行内字符级差异；过长、太不相似或差异过多时返回 null，只保留整行底色
+  function charDiff(x, y, ic) {
+    if (x.length > CHAR_MAX || y.length > CHAR_MAX) return null;
+    const ca = Array.from(x), cb = Array.from(y);
+    const ka = ic ? ca.map((c) => c.toLowerCase()) : ca;
+    const kb = ic ? cb.map((c) => c.toLowerCase()) : cb;
+    const [p, s] = trimCommon(ka, kb);
+    const ops = myers(ka.slice(p, ka.length - s), kb.slice(p, kb.length - s), CHAR_D);
+    if (!ops) return null;
+    const fa = new Array(ca.length).fill(0), fb = new Array(cb.length).fill(0);
+    let i = p, j = p, common = p + s;
+    for (const op of ops) {
+      if (op === OP_EQ) { i++; j++; common++; } else if (op === OP_DEL) fa[i++] = 1; else fb[j++] = 1;
+    }
+    if (common * 2 < (ca.length + cb.length) * 0.4) return null;
+    return [segments(ca, fa), segments(cb, fb)];
+  }
+
+  function pairSegs(part, i) {
+    if (part.rough) return null;
+    if (part.segs[i] === undefined) part.segs[i] = charDiff(state.A[part.a0 + i], state.B[part.b0 + i], state.ic);
+    return part.segs[i];
+  }
+
+  function compute() {
+    clearTimeout(timer);
+    timer = null;
+    const ta = left.value, tb = right.value;
+    const A = splitLines(ta), B = splitLines(tb);
+    const ws = $('optWs').checked, ic = $('optCase').checked;
+    state = { A, B, ic, empty: !ta && !tb, parts: [], fallback: false };
+    if (!state.empty) {
+      const [aIds, bIds] = toIds([A, B], ws, ic);
+      Object.assign(state, diffLines(aIds, bIds));
+    }
+    const stats = { blocks: 0, add: 0, del: 0, mod: 0 };
+    state.parts.forEach((p) => {
+      if (p.kind !== 'chg') return;
+      stats.blocks++;
+      stats.add += p.bn;
+      stats.del += p.an;
+      stats.mod += Math.min(p.an, p.bn);
+    });
+    state.stats = stats;
+    state.same = !state.empty && stats.blocks === 0;
+    state.rawSame = state.same && A.length === B.length && A.every((line, i) => line === B[i]);
+    render();
+  }
+
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(compute, 250);
+  }
+
+  // ===== 渲染 =====
+  function numCell(i, cls) {
+    return el('span', 'ln' + (cls ? ' ' + cls : ''), i >= 0 ? String(i + 1) : '');
+  }
+
+  function textCell(text, cls, segs) {
+    const cell = el('span', 'tx' + (cls ? ' ' + cls : ''));
+    if (!segs) { cell.textContent = text; return cell; }
+    segs.forEach(([t, changed]) => {
+      cell.appendChild(changed ? el('span', 'hl', t) : document.createTextNode(t));
+    });
+    return cell;
+  }
+
+  function splitRow(ai, bi, changed, segs) {
+    const row = el('div', 'r');
+    const lc = ai < 0 ? 'none' : changed ? 'del' : '';
+    const rc = bi < 0 ? 'none' : changed ? 'add' : '';
+    row.append(
+      numCell(ai, lc), textCell(ai < 0 ? '' : state.A[ai], lc, segs && segs[0]),
+      numCell(bi, 'mid' + (rc ? ' ' + rc : '')), textCell(bi < 0 ? '' : state.B[bi], rc, segs && segs[1])
+    );
+    return row;
+  }
+
+  function uniRow(ai, bi, mark, segs) {
+    const cls = mark === '-' ? 'del' : mark === '+' ? 'add' : '';
+    const text = mark === '+' ? state.B[bi] : state.A[ai];
+    const row = el('div', 'r');
+    row.append(numCell(mark === '+' ? -1 : ai, cls), numCell(mark === '-' ? -1 : bi, cls),
+      el('span', 'mk' + (cls ? ' ' + cls : ''), mark === '-' ? '−' : mark), textCell(text, cls, segs));
+    return row;
+  }
+
+  function eqRow(part, i) {
+    const ai = part.a0 + i, bi = part.b0 + i;
+    return view === 'split' ? splitRow(ai, bi, false, null) : uniRow(ai, bi, ' ', null);
+  }
+
+  // 返回仍折叠的行区间 [from, to)，没有折叠时返回 null
+  function hiddenRange(part, idx) {
+    if (!$('optOnly').checked) return null;
+    const lo = (idx === 0 ? 0 : CTX) + part.rev;
+    const hi = idx === state.parts.length - 1 ? part.n : part.n - CTX;
+    return hi > lo ? [lo, hi] : null;
+  }
+
+  // 分块包裹行，配合 content-visibility 让屏幕外的行跳过布局
+  function newCtx(cap) {
+    return { frag: document.createDocumentFragment(), chunk: null, count: 0, cap, full: false };
+  }
+
+  function add(ctx, make) {
+    if (ctx.count >= ctx.cap) { ctx.full = true; return false; }
+    if (!ctx.chunk || ctx.chunk.childElementCount >= CHUNK) {
+      ctx.chunk = ctx.frag.appendChild(el('div', 'chunk'));
+      ctx.chunk.style.setProperty('--rows', CHUNK);
+    }
+    ctx.chunk.appendChild(make());
+    ctx.count++;
+    return true;
+  }
+
+  function finish(ctx) {
+    if (ctx.chunk) ctx.chunk.style.setProperty('--rows', ctx.chunk.childElementCount);
+    return ctx.frag;
+  }
+
+  function foldRow(part, idx, count) {
+    const btn = el('button', 'fold', tr('res.fold', fmt(count)));
+    btn.type = 'button';
+    btn.addEventListener('click', () => {
+      const [lo] = hiddenRange(part, idx);
+      part.rev += Math.min(EXPAND_STEP, count);
+      const ctx = newCtx(Infinity);
+      const h = hiddenRange(part, idx);
+      const stop = h ? h[0] : lo + count;
+      for (let i = lo; i < stop; i++) add(ctx, () => eqRow(part, i));
+      if (h) add(ctx, () => foldRow(part, idx, h[1] - h[0]));
+      btn.replaceWith(finish(ctx));
+    });
+    return btn;
+  }
+
+  function emitEq(ctx, part, idx) {
+    const h = hiddenRange(part, idx);
+    for (let i = 0; i < part.n; i++) {
+      if (h && i === h[0]) {
+        if (!add(ctx, () => foldRow(part, idx, h[1] - h[0]))) return;
+        i = h[1] - 1;
+        continue;
+      }
+      if (!add(ctx, () => eqRow(part, i))) return;
+    }
+  }
+
+  function emitChg(ctx, part) {
+    const pairs = Math.min(part.an, part.bn);
+    if (view === 'split') {
+      for (let i = 0; i < Math.max(part.an, part.bn); i++) {
+        const ai = i < part.an ? part.a0 + i : -1, bi = i < part.bn ? part.b0 + i : -1;
+        if (!add(ctx, () => splitRow(ai, bi, true, i < pairs ? pairSegs(part, i) : null))) return;
+      }
+      return;
+    }
+    for (let i = 0; i < part.an; i++) {
+      if (!add(ctx, () => uniRow(part.a0 + i, -1, '-', i < pairs ? (pairSegs(part, i) || [])[0] : null))) return;
+    }
+    for (let i = 0; i < part.bn; i++) {
+      if (!add(ctx, () => uniRow(-1, part.b0 + i, '+', i < pairs ? (pairSegs(part, i) || [])[1] : null))) return;
+    }
+  }
+
+  function setStatus(kind, badgeKey, message, note) {
+    const badge = $('badge');
+    badge.className = 'badge ' + kind;
+    badge.textContent = tr(badgeKey);
+    const msg = $('msg');
+    msg.className = 'status-msg' + (note ? ' note' : '');
+    msg.textContent = message || '';
+  }
+
+  function renderStats() {
+    const stats = $('stats');
+    stats.replaceChildren();
+    stats.removeAttribute('title');
+    if (!state || state.empty || state.same) return;
+    stats.title = tr('tip.stats');
+    stats.append(el('span', 'stat-add', '+' + fmt(state.stats.add)), el('span', 'stat-del', '−' + fmt(state.stats.del)));
+  }
+
+  function render() {
+    $('viewSplit').setAttribute('aria-pressed', String(view === 'split'));
+    $('viewUnified').setAttribute('aria-pressed', String(view === 'unified'));
+    $('oldMeta').textContent = state && state.A.length ? tr('meta.lines', fmt(state.A.length)) : '';
+    $('newMeta').textContent = state && state.B.length ? tr('meta.lines', fmt(state.B.length)) : '';
+    renderStats();
+    out.replaceChildren();
+    out.className = 'diff-out';
+    if (!state || state.empty) {
+      out.classList.add('msg');
+      out.textContent = tr('res.empty');
+      setStatus('idle', 'badge.idle');
+      return;
+    }
+    if (state.same) {
+      out.classList.add('msg', 'same');
+      const text = tr(state.rawSame ? 'res.same' : 'res.sameIgnored');
+      out.textContent = text;
+      setStatus('ok', 'badge.same', text);
+      return;
+    }
+    if (view === 'unified') out.classList.add('unified');
+    out.style.setProperty('--lnw', 'calc(' + Math.max(2, String(Math.max(state.A.length, state.B.length)).length) + 'ch + 14px)');
+    const ctx = newCtx(ROW_CAP);
+    state.parts.forEach((part, idx) => {
+      if (ctx.full) return;
+      if (part.kind === 'eq') emitEq(ctx, part, idx); else emitChg(ctx, part);
+    });
+    if (ctx.full) ctx.frag.appendChild(el('div', 'more', tr('res.more', fmt(ROW_CAP))));
+    out.appendChild(finish(ctx));
+
+    const st = state.stats;
+    const notes = [];
+    if (state.fallback) notes.push(tr('msg.fallback'));
+    if (ctx.full) notes.push(tr('msg.truncated', fmt(ROW_CAP)));
+    const base = tr('msg.diff', fmt(st.blocks), fmt(st.add - st.mod), fmt(st.del - st.mod), fmt(st.mod));
+    setStatus('warn', 'badge.diff', [base].concat(notes).join(' · '), notes.length > 0);
+  }
+
+  // ===== unified diff 输出 =====
+  function hunkRange(pos, len) {
+    return (len === 0 ? pos : pos + 1) + (len === 1 ? '' : ',' + len);
+  }
+
+  function unifiedDiff() {
+    if (!state || state.empty || state.same) return '';
+    const { A, B } = state;
+    const ops = [];
+    state.parts.forEach((p) => {
+      if (p.kind === 'eq') {
+        for (let i = 0; i < p.n; i++) ops.push([' ', p.a0 + i, p.b0 + i]);
+        return;
+      }
+      for (let i = 0; i < p.an; i++) ops.push(['-', p.a0 + i, p.b0]);
+      for (let i = 0; i < p.bn; i++) ops.push(['+', p.a0 + p.an, p.b0 + i]);
+    });
+    const isChg = (k) => ops[k][0] !== ' ';
+    const lines = ['--- ' + tr('pane.old'), '+++ ' + tr('pane.new')];
+    let k = 0;
+    while (k < ops.length) {
+      while (k < ops.length && !isChg(k)) k++;
+      if (k >= ops.length) break;
+      const start = Math.max(0, k - CTX);
+      let end = k;
+      for (;;) {
+        while (end < ops.length && isChg(end)) end++;
+        let next = end;
+        while (next < ops.length && !isChg(next)) next++;
+        if (next < ops.length && next - end <= 2 * CTX) { end = next; continue; }
+        break;
+      }
+      const stop = Math.min(ops.length, end + CTX);
+      const body = [];
+      let oc = 0, nc = 0;
+      for (let j = start; j < stop; j++) {
+        const [t, ai, bi] = ops[j];
+        if (t !== '+') oc++;
+        if (t !== '-') nc++;
+        body.push(t + (t === '+' ? B[bi] : A[ai]));
+      }
+      lines.push('@@ -' + hunkRange(ops[start][1], oc) + ' +' + hunkRange(ops[start][2], nc) + ' @@');
+      lines.push(...body);
+      k = stop;
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  // ===== 事件 =====
+  function setView(next) {
+    if (view === next) return;
+    view = next;
+    render();
+  }
+
+  left.addEventListener('input', schedule);
+  right.addEventListener('input', schedule);
+  ['optWs', 'optCase'].forEach((id) => $(id).addEventListener('change', compute));
+  $('optOnly').addEventListener('change', () => {
+    if (state) state.parts.forEach((p) => { p.rev = 0; });
+    render();
+  });
+  $('viewSplit').addEventListener('click', () => setView('split'));
+  $('viewUnified').addEventListener('click', () => setView('unified'));
+  $('btnSwap').addEventListener('click', () => {
+    const t = left.value;
+    left.value = right.value;
+    right.value = t;
+    compute();
+  });
+  $('btnSample').addEventListener('click', () => {
+    left.value = SAMPLE_OLD;
+    right.value = SAMPLE_NEW;
+    compute();
+  });
+  $('btnClear').addEventListener('click', () => {
+    left.value = '';
+    right.value = '';
+    compute();
+    left.focus();
+    page.toast(tr('toast.cleared'));
+  });
+  $('btnCopy').addEventListener('click', () => {
+    if (timer) compute();
+    const text = unifiedDiff();
+    if (!text) { page.toast(tr(state && !state.empty ? 'toast.noDiff' : 'toast.empty')); return; }
+    page.copy(text);
+  });
+  $('btnDownload').addEventListener('click', () => {
+    if (timer) compute();
+    const text = unifiedDiff();
+    if (!text) { page.toast(tr(state && !state.empty ? 'toast.noDiff' : 'toast.empty')); return; }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    page.download(text, 'diff-' + stamp + '.diff', 'text/x-diff;charset=utf-8');
+  });
+
+  compute();
+})();
+</script>
+</body>
+</html>

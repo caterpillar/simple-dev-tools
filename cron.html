@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cron 解析</title>
+<meta name="description" content="本地离线 Cron 表达式解析：支持 Unix、Spring 与 Quartz 语法，逐字段说明并列出接下来的执行时间。">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="toolbox.css">
+<script src="toolbox-nav.js"></script>
+<style>
+  .toolbar #expr { flex: 1 1 240px; min-width: 160px; }
+  .toolbar select { field-sizing: content; max-width: 16em; }
+  .tb-group { display: inline-flex; align-items: center; gap: var(--tb-gap); flex: 0 0 auto; }
+  .kv + .kv { border-top: 8px solid var(--panel); }
+  .kv td.plain { font-family: inherit; font-size: 13px; word-break: normal; overflow-wrap: anywhere; }
+  .kv .field { display: grid; grid-template-columns: minmax(0, 8em) minmax(0, 1fr); gap: 2px 16px; align-items: baseline; }
+  .kv .tok { font-family: var(--mono); font-size: 12.5px; color: var(--accent); font-weight: 600; word-break: break-all; }
+  .hint { margin: 0; padding: 16px; color: var(--muted); font-size: 13px; }
+  .box { margin: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; overflow-wrap: anywhere; }
+  .box.err { color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); }
+  .box.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
+  .runs { list-style: none; margin: 0; padding: 0; }
+  .runs li {
+    display: grid; grid-template-columns: 2em auto auto minmax(0, 1fr); gap: 2px 12px; align-items: baseline;
+    padding: 7px 12px; border-bottom: 1px solid var(--border);
+  }
+  .runs .idx { font-family: var(--mono); font-size: 11.5px; color: var(--muted); text-align: right; }
+  .runs .when { font-family: var(--mono); font-size: 13px; }
+  .runs .wd { font-size: 13px; color: var(--muted); }
+  .runs .rel { font-size: 12.5px; color: var(--muted); text-align: right; }
+  .runs li.first { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .runs li.first .when { color: var(--accent); font-weight: 600; }
+  .runs li.first .wd, .runs li.first .rel { color: var(--text); }
+  .runs li:hover { background: var(--panel); }
+  .runs li.first:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+</style>
+</head>
+<body>
+<header class="titlebar">
+  <nav class="tool-tabs" id="toolTabs" data-current="cron"></nav>
+  <div class="titlebar-right" id="toolboxControls"></div>
+</header>
+
+<div class="toolbar">
+  <input type="text" id="expr" class="grow" spellcheck="false" autocomplete="off" data-i18n-ph="ph.expr" data-i18n-aria="aria.expr">
+  <span class="tb-sep"></span>
+  <span class="tb-group">
+    <label class="tb-label" for="selDialect" data-i18n="lbl.dialect">语法</label>
+    <select id="selDialect" data-i18n-title="tip.dialect">
+      <option value="auto" data-i18n="dialect.auto">自动</option>
+      <option value="unix" data-i18n="dialect.unix">Unix（5 位）</option>
+      <option value="spring" data-i18n="dialect.spring">Spring（6 位）</option>
+      <option value="quartz" data-i18n="dialect.quartz">Quartz（6/7 位）</option>
+    </select>
+  </span>
+  <span class="tb-group">
+    <label class="tb-label" for="selTz" data-i18n="lbl.tz">时区</label>
+    <select id="selTz" data-i18n-title="tip.tz">
+      <option value="local" data-i18n="tz.local">本地</option>
+      <option value="utc" data-i18n="tz.utc">UTC</option>
+    </select>
+  </span>
+  <span class="tb-group">
+    <label class="tb-label" for="selCount" data-i18n="lbl.count">次数</label>
+    <select id="selCount" data-i18n-title="tip.count">
+      <option value="5">5</option>
+      <option value="10" selected>10</option>
+      <option value="20">20</option>
+      <option value="50">50</option>
+    </select>
+  </span>
+  <span class="tb-sep"></span>
+  <select id="selPreset" data-i18n-title="tip.preset" data-i18n-aria="preset.label"></select>
+  <button type="button" id="btnCopy" data-i18n="btn.copy" data-i18n-title="tip.copy">复制</button>
+</div>
+
+<main class="workspace">
+  <section class="pane">
+    <div class="pane-head"><span data-i18n="pane.fields">字段说明</span><span class="meta" id="fieldsMeta"></span></div>
+    <div class="pane-body" id="fieldsBody"></div>
+  </section>
+  <section class="pane">
+    <div class="pane-head"><span data-i18n="pane.runs">接下来的执行时间</span><span class="meta" id="runsMeta"></span></div>
+    <div class="pane-body" id="runsBody"></div>
+  </section>
+</main>
+
+<footer class="status">
+  <span class="badge idle" id="badge"></span>
+  <span class="status-msg" id="msg"></span>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  const TEXT = {
+    'zh-CN': {
+      'ph.expr': '例如 */5 * * * *', 'aria.expr': 'Cron 表达式',
+      'lbl.dialect': '语法', 'tip.dialect': '自动：5 位按 Unix、6 位按 Spring、7 位按 Quartz 解析；6 位的 Quartz 表达式请手动选择',
+      'dialect.auto': '自动', 'dialect.unix': 'Unix（5 位）', 'dialect.spring': 'Spring（6 位）', 'dialect.quartz': 'Quartz（6/7 位）',
+      'lbl.tz': '时区', 'tip.tz': '按本地时区或 UTC 计算执行时间', 'tz.local': '本地', 'tz.utc': 'UTC',
+      'lbl.count': '次数', 'tip.count': '列出多少次执行时间',
+      'preset.label': '常用示例…', 'tip.preset': '选择后填入表达式', 'tip.copy': '复制表达式',
+      'p.everyMin': '每分钟', 'p.every5': '每 5 分钟', 'p.hourly': '每小时整点', 'p.daily': '每天 0 点',
+      'p.weekday930': '工作日 9:30', 'p.mon8': '每周一 8:00', 'p.month1': '每月 1 号 0 点',
+      'p.monthLast': '每月最后一天 23:59（Quartz）', 'p.fri3': '每月第三个周五 10:00（Quartz）',
+      'p.spring30s': 'Spring 每 30 秒', 'p.yearly': '每年 1 月 1 日',
+      'pane.fields': '字段说明', 'pane.runs': '接下来的执行时间',
+      'sum.dialect': '语法', 'sum.dialectVal': '{0}（{1} 个字段）', 'sum.auto': ' · 自动识别', 'sum.expr': '规范化',
+      'sum.macro': '宏', 'sum.rule': '日期规则', 'sum.dow': '星期编号',
+      'rule.or': '「日」或「星期」任一匹配即执行（Vixie cron）', 'rule.and': '「日」和「星期」须同时匹配',
+      'dow.unix': '0–7，0 和 7 都表示{0}', 'dow.quartz': '1–7，1 表示{0}，7 表示{1}',
+      'f.sec': '秒', 'f.min': '分钟', 'f.hour': '小时', 'f.dom': '日', 'f.mon': '月', 'f.dow': '星期', 'f.year': '年',
+      'desc.every': '每个值（{0}–{1}）', 'desc.any': '不指定（由另一个日期字段决定）', 'desc.count': '（{0} 个）',
+      'desc.L': '当月最后一天', 'desc.Ln': '当月倒数第 {1} 天', 'desc.LW': '当月最后一个工作日', 'desc.W': '离 {0} 号最近的工作日',
+      'desc.lastDow': '当月最后一个{0}', 'desc.nth': '当月第 {0} 个{1}', ord: '1|2|3|4|5', wdStyle: 'short',
+      'hint.idle': '在上方输入 Cron 表达式，或从“常用示例”中选择一个',
+      'runs.idle': '输入有效的表达式后，这里会列出接下来的执行时间', 'runs.err': '表达式有误，无法计算执行时间',
+      'runs.none': '截至 {0} 年都没有匹配的执行时间，请检查日期组合是否存在（例如 2 月 30 日）',
+      'runs.partial': '截至 {0} 年只找到 {1} 次执行',
+      'badge.idle': '待输入', 'badge.ok': '有效', 'badge.err': '错误',
+      'msg.ok': '{0} 语法 · 下次执行：{1}', 'msg.none': '{0} 语法 · 截至 {1} 年没有执行时间',
+      'err.fields': '应有 5、6 或 7 个字段，实际为 {0} 个', 'err.fieldsDialect': '{0} 语法需要 {1} 个字段，实际为 {2} 个',
+      'err.macro': '无法识别的宏「{0}」，可用 @yearly、@annually、@monthly、@weekly、@daily、@midnight、@hourly',
+      'err.reboot': '「@reboot」只在系统启动时执行，没有可计算的时间',
+      'err.unknown': '「{0}」字段：无法识别「{1}」', 'err.range': '「{0}」字段：「{1}」超出范围 {2}–{3}',
+      'err.reversed': '「{0}」字段：范围「{1}」的起点大于终点', 'err.step': '「{0}」字段：「{1}」的步长应在 1–{2} 之间',
+      'err.empty': '「{0}」字段：「{1}」中有空的列表项',
+      'err.special': '「{0}」字段：Unix 语法不支持「{1}」，L / W / # 只能用于 Spring 和 Quartz',
+      'err.qmark': '「{0}」字段：「{1}」只能用于「日」和「星期」字段', 'err.qmarkUnix': '「{0}」字段：Unix 语法不支持「{1}」，请改用 *',
+      'err.quartzQ': 'Quartz 语法：「{0}」（{1}）和「{2}」（{3}）中必须恰好有一个为 ?',
+      'err.nth': '「{0}」字段：「{1}」中 # 后的序号应为 1–5'
+    },
+    'zh-TW': {
+      'ph.expr': '例如 */5 * * * *', 'aria.expr': 'Cron 運算式',
+      'lbl.dialect': '語法', 'tip.dialect': '自動：5 欄位按 Unix、6 欄位按 Spring、7 欄位按 Quartz 解析；6 欄位的 Quartz 運算式請手動選擇',
+      'dialect.auto': '自動', 'dialect.unix': 'Unix（5 欄位）', 'dialect.spring': 'Spring（6 欄位）', 'dialect.quartz': 'Quartz（6/7 欄位）',
+      'lbl.tz': '時區', 'tip.tz': '依本機時區或 UTC 計算執行時間', 'tz.local': '本機', 'tz.utc': 'UTC',
+      'lbl.count': '次數', 'tip.count': '列出多少次執行時間',
+      'preset.label': '常用範例…', 'tip.preset': '選擇後填入運算式', 'tip.copy': '複製運算式',
+      'p.everyMin': '每分鐘', 'p.every5': '每 5 分鐘', 'p.hourly': '每小時整點', 'p.daily': '每天 0 點',
+      'p.weekday930': '工作日 9:30', 'p.mon8': '每週一 8:00', 'p.month1': '每月 1 號 0 點',
+      'p.monthLast': '每月最後一天 23:59（Quartz）', 'p.fri3': '每月第三個週五 10:00（Quartz）',
+      'p.spring30s': 'Spring 每 30 秒', 'p.yearly': '每年 1 月 1 日',
+      'pane.fields': '欄位說明', 'pane.runs': '接下來的執行時間',
+      'sum.dialect': '語法', 'sum.dialectVal': '{0}（{1} 個欄位）', 'sum.auto': ' · 自動辨識', 'sum.expr': '正規化',
+      'sum.macro': '巨集', 'sum.rule': '日期規則', 'sum.dow': '星期編號',
+      'rule.or': '「日」或「星期」任一符合即執行（Vixie cron）', 'rule.and': '「日」與「星期」須同時符合',
+      'dow.unix': '0–7，0 與 7 都代表{0}', 'dow.quartz': '1–7，1 代表{0}，7 代表{1}',
+      'f.sec': '秒', 'f.min': '分鐘', 'f.hour': '小時', 'f.dom': '日', 'f.mon': '月', 'f.dow': '星期', 'f.year': '年',
+      'desc.every': '每個值（{0}–{1}）', 'desc.any': '不指定（由另一個日期欄位決定）', 'desc.count': '（{0} 個）',
+      'desc.L': '當月最後一天', 'desc.Ln': '當月倒數第 {1} 天', 'desc.LW': '當月最後一個工作日', 'desc.W': '離 {0} 號最近的工作日',
+      'desc.lastDow': '當月最後一個{0}', 'desc.nth': '當月第 {0} 個{1}', ord: '1|2|3|4|5', wdStyle: 'short',
+      'hint.idle': '在上方輸入 Cron 運算式，或從「常用範例」中選擇一個',
+      'runs.idle': '輸入有效的運算式後，這裡會列出接下來的執行時間', 'runs.err': '運算式有誤，無法計算執行時間',
+      'runs.none': '截至 {0} 年都沒有符合的執行時間，請檢查日期組合是否存在（例如 2 月 30 日）',
+      'runs.partial': '截至 {0} 年只找到 {1} 次執行',
+      'badge.idle': '待輸入', 'badge.ok': '有效', 'badge.err': '錯誤',
+      'msg.ok': '{0} 語法 · 下次執行：{1}', 'msg.none': '{0} 語法 · 截至 {1} 年沒有執行時間',
+      'err.fields': '應有 5、6 或 7 個欄位，實際為 {0} 個', 'err.fieldsDialect': '{0} 語法需要 {1} 個欄位，實際為 {2} 個',
+      'err.macro': '無法辨識的巨集「{0}」，可用 @yearly、@annually、@monthly、@weekly、@daily、@midnight、@hourly',
+      'err.reboot': '「@reboot」只在系統啟動時執行，沒有可計算的時間',
+      'err.unknown': '「{0}」欄位：無法辨識「{1}」', 'err.range': '「{0}」欄位：「{1}」超出範圍 {2}–{3}',
+      'err.reversed': '「{0}」欄位：範圍「{1}」的起點大於終點', 'err.step': '「{0}」欄位：「{1}」的間隔應在 1–{2} 之間',
+      'err.empty': '「{0}」欄位：「{1}」中有空的清單項目',
+      'err.special': '「{0}」欄位：Unix 語法不支援「{1}」，L / W / # 只能用於 Spring 與 Quartz',
+      'err.qmark': '「{0}」欄位：「{1}」只能用於「日」與「星期」欄位', 'err.qmarkUnix': '「{0}」欄位：Unix 語法不支援「{1}」，請改用 *',
+      'err.quartzQ': 'Quartz 語法：「{0}」（{1}）與「{2}」（{3}）中必須恰好有一個為 ?',
+      'err.nth': '「{0}」欄位：「{1}」中 # 後的序號應為 1–5'
+    },
+    en: {
+      'ph.expr': 'e.g. */5 * * * *', 'aria.expr': 'Cron expression',
+      'lbl.dialect': 'Syntax', 'tip.dialect': 'Auto: 5 fields = Unix, 6 = Spring, 7 = Quartz; pick Quartz manually for 6-field Quartz expressions',
+      'dialect.auto': 'Auto', 'dialect.unix': 'Unix (5 fields)', 'dialect.spring': 'Spring (6 fields)', 'dialect.quartz': 'Quartz (6/7 fields)',
+      'lbl.tz': 'Time zone', 'tip.tz': 'Compute run times in local time or UTC', 'tz.local': 'Local', 'tz.utc': 'UTC',
+      'lbl.count': 'Count', 'tip.count': 'How many upcoming runs to list',
+      'preset.label': 'Presets…', 'tip.preset': 'Fill in a common expression', 'tip.copy': 'Copy the expression',
+      'p.everyMin': 'Every minute', 'p.every5': 'Every 5 minutes', 'p.hourly': 'Every hour on the hour', 'p.daily': 'Daily at midnight',
+      'p.weekday930': 'Weekdays at 9:30', 'p.mon8': 'Mondays at 8:00', 'p.month1': '1st of every month at 0:00',
+      'p.monthLast': 'Last day of month 23:59 (Quartz)', 'p.fri3': '3rd Friday of month 10:00 (Quartz)',
+      'p.spring30s': 'Spring: every 30 s', 'p.yearly': 'Every year on Jan 1',
+      'pane.fields': 'Fields', 'pane.runs': 'Next runs',
+      'sum.dialect': 'Syntax', 'sum.dialectVal': '{0} ({1} fields)', 'sum.auto': ' · auto-detected', 'sum.expr': 'Normalized',
+      'sum.macro': 'Macro', 'sum.rule': 'Day rule', 'sum.dow': 'Weekday numbers',
+      'rule.or': 'Runs when either day of month or day of week matches (Vixie cron)', 'rule.and': 'Day of month and day of week must both match',
+      'dow.unix': '0–7, both 0 and 7 mean {0}', 'dow.quartz': '1–7, 1 = {0}, 7 = {1}',
+      'f.sec': 'Second', 'f.min': 'Minute', 'f.hour': 'Hour', 'f.dom': 'Day of month', 'f.mon': 'Month', 'f.dow': 'Day of week', 'f.year': 'Year',
+      'desc.every': 'Every value ({0}–{1})', 'desc.any': 'No specific value (set by the other day field)', 'desc.count': ' ({0} values)',
+      'desc.L': 'Last day of the month', 'desc.Ln': 'Last day of the month minus {0}', 'desc.LW': 'Last weekday (Mon–Fri) of the month', 'desc.W': 'Weekday nearest to day {0}',
+      'desc.lastDow': 'Last {0} of the month', 'desc.nth': 'The {0} {1} of the month', ord: 'first|second|third|fourth|fifth', wdStyle: 'long',
+      'hint.idle': 'Type a cron expression above, or pick one from Presets',
+      'runs.idle': 'Upcoming run times appear here once the expression is valid', 'runs.err': 'The expression is invalid, so no run times can be computed',
+      'runs.none': 'No run time matches through {0}. Check that the date combination exists (e.g. February 30)',
+      'runs.partial': 'Only {1} runs found through {0}',
+      'badge.idle': 'Waiting', 'badge.ok': 'Valid', 'badge.err': 'Error',
+      'msg.ok': '{0} syntax · next run {1}', 'msg.none': '{0} syntax · no run through {1}',
+      'err.fields': 'Expected 5, 6 or 7 fields, got {0}', 'err.fieldsDialect': '{0} syntax needs {1} fields, got {2}',
+      'err.macro': 'Unknown macro "{0}". Use @yearly, @annually, @monthly, @weekly, @daily, @midnight or @hourly',
+      'err.reboot': '"@reboot" runs only at startup and has no schedule to compute',
+      'err.unknown': '{0} field: cannot parse "{1}"', 'err.range': '{0} field: "{1}" is out of range {2}–{3}',
+      'err.reversed': '{0} field: range "{1}" starts after it ends', 'err.step': '{0} field: the step in "{1}" must be 1–{2}',
+      'err.empty': '{0} field: "{1}" contains an empty list item',
+      'err.special': '{0} field: Unix syntax does not support "{1}"; L / W / # need Spring or Quartz',
+      'err.qmark': '{0} field: "{1}" is only allowed in the day-of-month and day-of-week fields', 'err.qmarkUnix': '{0} field: Unix syntax does not support "{1}"; use * instead',
+      'err.quartzQ': 'Quartz syntax: exactly one of {0} ("{1}") and {2} ("{3}") must be ?',
+      'err.nth': '{0} field: the number after # in "{1}" must be 1–5'
+    },
+    ja: {
+      'ph.expr': '例: */5 * * * *', 'aria.expr': 'Cron 式',
+      'lbl.dialect': '構文', 'tip.dialect': '自動：5 項目は Unix、6 項目は Spring、7 項目は Quartz として解析。6 項目の Quartz 式は手動で選択してください',
+      'dialect.auto': '自動', 'dialect.unix': 'Unix（5 項目）', 'dialect.spring': 'Spring（6 項目）', 'dialect.quartz': 'Quartz（6/7 項目）',
+      'lbl.tz': 'タイムゾーン', 'tip.tz': 'ローカル時刻または UTC で実行時刻を計算', 'tz.local': 'ローカル', 'tz.utc': 'UTC',
+      'lbl.count': '件数', 'tip.count': '表示する実行回数',
+      'preset.label': 'よく使う例…', 'tip.preset': 'よく使う式を入力します', 'tip.copy': '式をコピー',
+      'p.everyMin': '毎分', 'p.every5': '5 分ごと', 'p.hourly': '毎時 0 分', 'p.daily': '毎日 0 時',
+      'p.weekday930': '平日 9:30', 'p.mon8': '毎週月曜 8:00', 'p.month1': '毎月 1 日 0 時',
+      'p.monthLast': '毎月末日 23:59（Quartz）', 'p.fri3': '毎月第 3 金曜 10:00（Quartz）',
+      'p.spring30s': 'Spring 30 秒ごと', 'p.yearly': '毎年 1 月 1 日',
+      'pane.fields': 'フィールドの説明', 'pane.runs': '今後の実行時刻',
+      'sum.dialect': '構文', 'sum.dialectVal': '{0}（{1} 項目）', 'sum.auto': ' · 自動判別', 'sum.expr': '正規化',
+      'sum.macro': 'マクロ', 'sum.rule': '日付の規則', 'sum.dow': '曜日の番号',
+      'rule.or': '「日」と「曜日」のどちらかが一致すれば実行（Vixie cron）', 'rule.and': '「日」と「曜日」の両方が一致する必要があります',
+      'dow.unix': '0–7（0 と 7 はどちらも{0}）', 'dow.quartz': '1–7（1 は{0}、7 は{1}）',
+      'f.sec': '秒', 'f.min': '分', 'f.hour': '時', 'f.dom': '日', 'f.mon': '月', 'f.dow': '曜日', 'f.year': '年',
+      'desc.every': 'すべての値（{0}–{1}）', 'desc.any': '指定なし（もう一方の日付フィールドで決定）', 'desc.count': '（{0} 個）',
+      'desc.L': '月末日', 'desc.Ln': '月末日の {0} 日前', 'desc.LW': '月の最終平日', 'desc.W': '{0} 日に最も近い平日',
+      'desc.lastDow': '月の最終{0}', 'desc.nth': '月の第{0}{1}', ord: '1|2|3|4|5', wdStyle: 'long',
+      'hint.idle': '上に Cron 式を入力するか、「よく使う例」から選んでください',
+      'runs.idle': '有効な式を入力すると、今後の実行時刻がここに表示されます', 'runs.err': '式が正しくないため、実行時刻を計算できません',
+      'runs.none': '{0} 年まで一致する実行時刻がありません。存在しない日付（2 月 30 日など）になっていないか確認してください',
+      'runs.partial': '{0} 年までに見つかった実行は {1} 回のみです',
+      'badge.idle': '入力待ち', 'badge.ok': '有効', 'badge.err': 'エラー',
+      'msg.ok': '{0} 構文 · 次回実行：{1}', 'msg.none': '{0} 構文 · {1} 年まで実行なし',
+      'err.fields': 'フィールドは 5、6、7 個のいずれかが必要です（実際は {0} 個）', 'err.fieldsDialect': '{0} 構文には {1} 個のフィールドが必要です（実際は {2} 個）',
+      'err.macro': '不明なマクロ「{0}」です。@yearly、@annually、@monthly、@weekly、@daily、@midnight、@hourly が使えます',
+      'err.reboot': '「@reboot」は起動時にのみ実行されるため、計算できる時刻がありません',
+      'err.unknown': '「{0}」フィールド：「{1}」を解釈できません', 'err.range': '「{0}」フィールド：「{1}」は範囲 {2}–{3} の外です',
+      'err.reversed': '「{0}」フィールド：範囲「{1}」の開始が終了より大きくなっています', 'err.step': '「{0}」フィールド：「{1}」の間隔は 1–{2} にしてください',
+      'err.empty': '「{0}」フィールド：「{1}」に空のリスト項目があります',
+      'err.special': '「{0}」フィールド：Unix 構文では「{1}」を使えません（L / W / # は Spring と Quartz のみ）',
+      'err.qmark': '「{0}」フィールド：「{1}」は「日」と「曜日」フィールドでのみ使えます', 'err.qmarkUnix': '「{0}」フィールド：Unix 構文では「{1}」を使えません。* を使ってください',
+      'err.quartzQ': 'Quartz 構文：「{0}」（{1}）と「{2}」（{3}）のどちらか一方だけを ? にしてください',
+      'err.nth': '「{0}」フィールド：「{1}」の # の後の番号は 1–5 にしてください'
+    },
+    ko: {
+      'ph.expr': '예: */5 * * * *', 'aria.expr': 'Cron 표현식',
+      'lbl.dialect': '문법', 'tip.dialect': '자동: 5필드는 Unix, 6필드는 Spring, 7필드는 Quartz 로 해석합니다. 6필드 Quartz 식은 직접 선택하세요',
+      'dialect.auto': '자동', 'dialect.unix': 'Unix (5필드)', 'dialect.spring': 'Spring (6필드)', 'dialect.quartz': 'Quartz (6/7필드)',
+      'lbl.tz': '시간대', 'tip.tz': '로컬 시간 또는 UTC 기준으로 실행 시각을 계산합니다', 'tz.local': '로컬', 'tz.utc': 'UTC',
+      'lbl.count': '횟수', 'tip.count': '표시할 실행 횟수',
+      'preset.label': '자주 쓰는 예…', 'tip.preset': '자주 쓰는 식을 채워 넣습니다', 'tip.copy': '식 복사',
+      'p.everyMin': '매분', 'p.every5': '5분마다', 'p.hourly': '매시 정각', 'p.daily': '매일 0시',
+      'p.weekday930': '평일 9:30', 'p.mon8': '매주 월요일 8:00', 'p.month1': '매월 1일 0시',
+      'p.monthLast': '매월 마지막 날 23:59 (Quartz)', 'p.fri3': '매월 셋째 금요일 10:00 (Quartz)',
+      'p.spring30s': 'Spring 30초마다', 'p.yearly': '매년 1월 1일',
+      'pane.fields': '필드 설명', 'pane.runs': '다음 실행 시각',
+      'sum.dialect': '문법', 'sum.dialectVal': '{0} ({1}필드)', 'sum.auto': ' · 자동 인식', 'sum.expr': '정규화',
+      'sum.macro': '매크로', 'sum.rule': '날짜 규칙', 'sum.dow': '요일 번호',
+      'rule.or': '일 또는 요일 중 하나만 맞으면 실행 (Vixie cron)', 'rule.and': '일과 요일이 모두 맞아야 합니다',
+      'dow.unix': '0–7, 0과 7 모두 {0}', 'dow.quartz': '1–7, 1은 {0}, 7은 {1}',
+      'f.sec': '초', 'f.min': '분', 'f.hour': '시', 'f.dom': '일', 'f.mon': '월', 'f.dow': '요일', 'f.year': '연도',
+      'desc.every': '모든 값 ({0}–{1})', 'desc.any': '지정 안 함 (다른 날짜 필드로 결정)', 'desc.count': ' ({0}개)',
+      'desc.L': '매월 마지막 날', 'desc.Ln': '매월 마지막 날의 {0}일 전', 'desc.LW': '매월 마지막 평일', 'desc.W': '{0}일에 가장 가까운 평일',
+      'desc.lastDow': '매월 마지막 {0}', 'desc.nth': '매월 {0} {1}', ord: '첫째|둘째|셋째|넷째|다섯째', wdStyle: 'long',
+      'hint.idle': '위에 Cron 표현식을 입력하거나 "자주 쓰는 예"에서 고르세요',
+      'runs.idle': '올바른 식을 입력하면 다음 실행 시각이 여기에 표시됩니다', 'runs.err': '식이 올바르지 않아 실행 시각을 계산할 수 없습니다',
+      'runs.none': '{0}년까지 일치하는 실행 시각이 없습니다. 존재하는 날짜인지(예: 2월 30일) 확인하세요',
+      'runs.partial': '{0}년까지 실행이 {1}회만 있습니다',
+      'badge.idle': '입력 대기', 'badge.ok': '유효', 'badge.err': '오류',
+      'msg.ok': '{0} 문법 · 다음 실행: {1}', 'msg.none': '{0} 문법 · {1}년까지 실행 없음',
+      'err.fields': '필드는 5, 6, 7개 중 하나여야 합니다 (현재 {0}개)', 'err.fieldsDialect': '{0} 문법은 필드 {1}개가 필요합니다 (현재 {2}개)',
+      'err.macro': '알 수 없는 매크로 "{0}". @yearly, @annually, @monthly, @weekly, @daily, @midnight, @hourly 를 사용할 수 있습니다',
+      'err.reboot': '"@reboot" 는 시작할 때만 실행되어 계산할 시각이 없습니다',
+      'err.unknown': '"{0}" 필드: "{1}" 을(를) 해석할 수 없습니다', 'err.range': '"{0}" 필드: "{1}" 이(가) 범위 {2}–{3} 을(를) 벗어났습니다',
+      'err.reversed': '"{0}" 필드: 범위 "{1}" 의 시작이 끝보다 큽니다', 'err.step': '"{0}" 필드: "{1}" 의 간격은 1–{2} 이어야 합니다',
+      'err.empty': '"{0}" 필드: "{1}" 에 빈 목록 항목이 있습니다',
+      'err.special': '"{0}" 필드: Unix 문법은 "{1}" 을(를) 지원하지 않습니다 (L / W / # 는 Spring, Quartz 전용)',
+      'err.qmark': '"{0}" 필드: "{1}" 은(는) 일과 요일 필드에만 쓸 수 있습니다', 'err.qmarkUnix': '"{0}" 필드: Unix 문법은 "{1}" 을(를) 지원하지 않습니다. * 를 쓰세요',
+      'err.quartzQ': 'Quartz 문법: "{0}"({1})와 "{2}"({3}) 중 정확히 하나만 ? 여야 합니다',
+      'err.nth': '"{0}" 필드: "{1}" 에서 # 뒤의 순번은 1–5 여야 합니다'
+    },
+    es: {
+      'ph.expr': 'p. ej. */5 * * * *', 'aria.expr': 'Expresión cron',
+      'lbl.dialect': 'Sintaxis', 'tip.dialect': 'Auto: 5 campos = Unix, 6 = Spring, 7 = Quartz; elige Quartz a mano para expresiones Quartz de 6 campos',
+      'dialect.auto': 'Auto', 'dialect.unix': 'Unix (5 campos)', 'dialect.spring': 'Spring (6 campos)', 'dialect.quartz': 'Quartz (6/7 campos)',
+      'lbl.tz': 'Zona', 'tip.tz': 'Calcula las ejecuciones en hora local o UTC', 'tz.local': 'Local', 'tz.utc': 'UTC',
+      'lbl.count': 'Cantidad', 'tip.count': 'Cuántas ejecuciones mostrar',
+      'preset.label': 'Ejemplos…', 'tip.preset': 'Rellena una expresión habitual', 'tip.copy': 'Copiar la expresión',
+      'p.everyMin': 'Cada minuto', 'p.every5': 'Cada 5 minutos', 'p.hourly': 'Cada hora en punto', 'p.daily': 'Cada día a las 0:00',
+      'p.weekday930': 'Laborables a las 9:30', 'p.mon8': 'Los lunes a las 8:00', 'p.month1': 'El día 1 de cada mes a las 0:00',
+      'p.monthLast': 'Último día del mes 23:59 (Quartz)', 'p.fri3': 'Tercer viernes del mes 10:00 (Quartz)',
+      'p.spring30s': 'Spring: cada 30 s', 'p.yearly': 'Cada año el 1 de enero',
+      'pane.fields': 'Campos', 'pane.runs': 'Próximas ejecuciones',
+      'sum.dialect': 'Sintaxis', 'sum.dialectVal': '{0} ({1} campos)', 'sum.auto': ' · detectada', 'sum.expr': 'Normalizada',
+      'sum.macro': 'Macro', 'sum.rule': 'Regla de días', 'sum.dow': 'Números de día',
+      'rule.or': 'Se ejecuta si coincide el día del mes o el de la semana (Vixie cron)', 'rule.and': 'Deben coincidir el día del mes y el de la semana',
+      'dow.unix': '0–7; tanto 0 como 7 son {0}', 'dow.quartz': '1–7; 1 = {0}, 7 = {1}',
+      'f.sec': 'Segundo', 'f.min': 'Minuto', 'f.hour': 'Hora', 'f.dom': 'Día del mes', 'f.mon': 'Mes', 'f.dow': 'Día de la semana', 'f.year': 'Año',
+      'desc.every': 'Todos los valores ({0}–{1})', 'desc.any': 'Sin valor concreto (lo fija el otro campo de día)', 'desc.count': ' ({0} valores)',
+      'desc.L': 'Último día del mes', 'desc.Ln': 'Último día del mes menos {0}', 'desc.LW': 'Último día laborable del mes', 'desc.W': 'Día laborable más cercano al día {0}',
+      'desc.lastDow': 'Último {0} del mes', 'desc.nth': 'El {0} {1} del mes', ord: 'primer|segundo|tercer|cuarto|quinto', wdStyle: 'long',
+      'hint.idle': 'Escribe arriba una expresión cron o elige una en Ejemplos',
+      'runs.idle': 'Aquí aparecerán las próximas ejecuciones cuando la expresión sea válida', 'runs.err': 'La expresión no es válida; no se pueden calcular ejecuciones',
+      'runs.none': 'Ninguna ejecución coincide hasta {0}. Comprueba que la fecha exista (p. ej., 30 de febrero)',
+      'runs.partial': 'Solo hay {1} ejecuciones hasta {0}',
+      'badge.idle': 'En espera', 'badge.ok': 'Válida', 'badge.err': 'Error',
+      'msg.ok': 'Sintaxis {0} · próxima ejecución {1}', 'msg.none': 'Sintaxis {0} · sin ejecuciones hasta {1}',
+      'err.fields': 'Se esperaban 5, 6 o 7 campos; hay {0}', 'err.fieldsDialect': 'La sintaxis {0} requiere {1} campos; hay {2}',
+      'err.macro': 'Macro desconocida «{0}». Usa @yearly, @annually, @monthly, @weekly, @daily, @midnight o @hourly',
+      'err.reboot': '«@reboot» solo se ejecuta al arrancar; no hay horario que calcular',
+      'err.unknown': 'Campo «{0}»: no se reconoce «{1}»', 'err.range': 'Campo «{0}»: «{1}» está fuera del rango {2}–{3}',
+      'err.reversed': 'Campo «{0}»: el rango «{1}» empieza después de terminar', 'err.step': 'Campo «{0}»: el paso de «{1}» debe estar entre 1 y {2}',
+      'err.empty': 'Campo «{0}»: «{1}» contiene un elemento vacío',
+      'err.special': 'Campo «{0}»: la sintaxis Unix no admite «{1}»; L / W / # requieren Spring o Quartz',
+      'err.qmark': 'Campo «{0}»: «{1}» solo se permite en los campos de día del mes y día de la semana', 'err.qmarkUnix': 'Campo «{0}»: la sintaxis Unix no admite «{1}»; usa *',
+      'err.quartzQ': 'Sintaxis Quartz: exactamente uno de «{0}» ({1}) y «{2}» ({3}) debe ser ?',
+      'err.nth': 'Campo «{0}»: el número tras # en «{1}» debe estar entre 1 y 5'
+    },
+    fr: {
+      'ph.expr': 'ex. */5 * * * *', 'aria.expr': 'Expression cron',
+      'lbl.dialect': 'Syntaxe', 'tip.dialect': 'Auto : 5 champs = Unix, 6 = Spring, 7 = Quartz ; choisissez Quartz manuellement pour une expression Quartz à 6 champs',
+      'dialect.auto': 'Auto', 'dialect.unix': 'Unix (5 champs)', 'dialect.spring': 'Spring (6 champs)', 'dialect.quartz': 'Quartz (6/7 champs)',
+      'lbl.tz': 'Fuseau', 'tip.tz': 'Calcule les exécutions en heure locale ou UTC', 'tz.local': 'Local', 'tz.utc': 'UTC',
+      'lbl.count': 'Nombre', 'tip.count': 'Nombre d’exécutions à afficher',
+      'preset.label': 'Exemples…', 'tip.preset': 'Insère une expression courante', 'tip.copy': 'Copier l’expression',
+      'p.everyMin': 'Chaque minute', 'p.every5': 'Toutes les 5 minutes', 'p.hourly': 'Toutes les heures pile', 'p.daily': 'Chaque jour à minuit',
+      'p.weekday930': 'En semaine à 9 h 30', 'p.mon8': 'Le lundi à 8 h', 'p.month1': 'Le 1er du mois à minuit',
+      'p.monthLast': 'Dernier jour du mois 23 h 59 (Quartz)', 'p.fri3': '3e vendredi du mois 10 h (Quartz)',
+      'p.spring30s': 'Spring : toutes les 30 s', 'p.yearly': 'Chaque année le 1er janvier',
+      'pane.fields': 'Champs', 'pane.runs': 'Prochaines exécutions',
+      'sum.dialect': 'Syntaxe', 'sum.dialectVal': '{0} ({1} champs)', 'sum.auto': ' · détectée', 'sum.expr': 'Normalisée',
+      'sum.macro': 'Macro', 'sum.rule': 'Règle des jours', 'sum.dow': 'Numéros des jours',
+      'rule.or': 'S’exécute si le jour du mois ou le jour de la semaine correspond (Vixie cron)', 'rule.and': 'Le jour du mois et le jour de la semaine doivent correspondre',
+      'dow.unix': '0–7 ; 0 et 7 désignent le {0}', 'dow.quartz': '1–7 ; 1 = {0}, 7 = {1}',
+      'f.sec': 'Seconde', 'f.min': 'Minute', 'f.hour': 'Heure', 'f.dom': 'Jour du mois', 'f.mon': 'Mois', 'f.dow': 'Jour de la semaine', 'f.year': 'Année',
+      'desc.every': 'Toutes les valeurs ({0}–{1})', 'desc.any': 'Aucune valeur précise (définie par l’autre champ de jour)', 'desc.count': ' ({0} valeurs)',
+      'desc.L': 'Dernier jour du mois', 'desc.Ln': 'Dernier jour du mois moins {0}', 'desc.LW': 'Dernier jour ouvré du mois', 'desc.W': 'Jour ouvré le plus proche du {0}',
+      'desc.lastDow': 'Dernier {0} du mois', 'desc.nth': 'Le {0} {1} du mois', ord: 'premier|deuxième|troisième|quatrième|cinquième', wdStyle: 'long',
+      'hint.idle': 'Saisissez une expression cron ci-dessus ou choisissez-en une dans Exemples',
+      'runs.idle': 'Les prochaines exécutions s’afficheront ici dès que l’expression sera valide', 'runs.err': 'L’expression est invalide ; impossible de calculer les exécutions',
+      'runs.none': 'Aucune exécution jusqu’en {0}. Vérifiez que la date existe (ex. 30 février)',
+      'runs.partial': 'Seulement {1} exécutions jusqu’en {0}',
+      'badge.idle': 'En attente', 'badge.ok': 'Valide', 'badge.err': 'Erreur',
+      'msg.ok': 'Syntaxe {0} · prochaine exécution {1}', 'msg.none': 'Syntaxe {0} · aucune exécution jusqu’en {1}',
+      'err.fields': '5, 6 ou 7 champs attendus ; {0} trouvés', 'err.fieldsDialect': 'La syntaxe {0} exige {1} champs ; {2} trouvés',
+      'err.macro': 'Macro inconnue « {0} ». Utilisez @yearly, @annually, @monthly, @weekly, @daily, @midnight ou @hourly',
+      'err.reboot': '« @reboot » ne s’exécute qu’au démarrage ; aucun horaire à calculer',
+      'err.unknown': 'Champ « {0} » : « {1} » non reconnu', 'err.range': 'Champ « {0} » : « {1} » hors de la plage {2}–{3}',
+      'err.reversed': 'Champ « {0} » : la plage « {1} » commence après sa fin', 'err.step': 'Champ « {0} » : le pas de « {1} » doit être compris entre 1 et {2}',
+      'err.empty': 'Champ « {0} » : « {1} » contient un élément vide',
+      'err.special': 'Champ « {0} » : la syntaxe Unix ne prend pas en charge « {1} » ; L / W / # exigent Spring ou Quartz',
+      'err.qmark': 'Champ « {0} » : « {1} » n’est autorisé que dans les champs jour du mois et jour de la semaine', 'err.qmarkUnix': 'Champ « {0} » : la syntaxe Unix ne prend pas en charge « {1} » ; utilisez *',
+      'err.quartzQ': 'Syntaxe Quartz : exactement un des champs « {0} » ({1}) et « {2} » ({3}) doit valoir ?',
+      'err.nth': 'Champ « {0} » : le numéro après # dans « {1} » doit être compris entre 1 et 5'
+    },
+    de: {
+      'ph.expr': 'z. B. */5 * * * *', 'aria.expr': 'Cron-Ausdruck',
+      'lbl.dialect': 'Syntax', 'tip.dialect': 'Auto: 5 Felder = Unix, 6 = Spring, 7 = Quartz; für Quartz-Ausdrücke mit 6 Feldern Quartz manuell wählen',
+      'dialect.auto': 'Auto', 'dialect.unix': 'Unix (5 Felder)', 'dialect.spring': 'Spring (6 Felder)', 'dialect.quartz': 'Quartz (6/7 Felder)',
+      'lbl.tz': 'Zeitzone', 'tip.tz': 'Ausführungszeiten in Ortszeit oder UTC berechnen', 'tz.local': 'Lokal', 'tz.utc': 'UTC',
+      'lbl.count': 'Anzahl', 'tip.count': 'Wie viele Ausführungen angezeigt werden',
+      'preset.label': 'Beispiele…', 'tip.preset': 'Gängigen Ausdruck einfügen', 'tip.copy': 'Ausdruck kopieren',
+      'p.everyMin': 'Jede Minute', 'p.every5': 'Alle 5 Minuten', 'p.hourly': 'Stündlich zur vollen Stunde', 'p.daily': 'Täglich um 0:00',
+      'p.weekday930': 'Werktags um 9:30', 'p.mon8': 'Montags um 8:00', 'p.month1': 'Am 1. jedes Monats um 0:00',
+      'p.monthLast': 'Letzter Tag im Monat 23:59 (Quartz)', 'p.fri3': '3. Freitag im Monat 10:00 (Quartz)',
+      'p.spring30s': 'Spring: alle 30 s', 'p.yearly': 'Jährlich am 1. Januar',
+      'pane.fields': 'Felder', 'pane.runs': 'Nächste Ausführungen',
+      'sum.dialect': 'Syntax', 'sum.dialectVal': '{0} ({1} Felder)', 'sum.auto': ' · erkannt', 'sum.expr': 'Normalisiert',
+      'sum.macro': 'Makro', 'sum.rule': 'Tagesregel', 'sum.dow': 'Wochentagsnummern',
+      'rule.or': 'Läuft, wenn Tag im Monat oder Wochentag passt (Vixie cron)', 'rule.and': 'Tag im Monat und Wochentag müssen beide passen',
+      'dow.unix': '0–7; 0 und 7 stehen für {0}', 'dow.quartz': '1–7; 1 = {0}, 7 = {1}',
+      'f.sec': 'Sekunde', 'f.min': 'Minute', 'f.hour': 'Stunde', 'f.dom': 'Tag im Monat', 'f.mon': 'Monat', 'f.dow': 'Wochentag', 'f.year': 'Jahr',
+      'desc.every': 'Jeder Wert ({0}–{1})', 'desc.any': 'Kein bestimmter Wert (legt das andere Tagesfeld fest)', 'desc.count': ' ({0} Werte)',
+      'desc.L': 'Letzter Tag des Monats', 'desc.Ln': 'Letzter Tag des Monats minus {0}', 'desc.LW': 'Letzter Werktag des Monats', 'desc.W': 'Werktag am nächsten zum {0}.',
+      'desc.lastDow': 'Letzter {0} im Monat', 'desc.nth': '{0} {1} im Monat', ord: 'Erster|Zweiter|Dritter|Vierter|Fünfter', wdStyle: 'long',
+      'hint.idle': 'Oben einen Cron-Ausdruck eingeben oder einen aus Beispiele wählen',
+      'runs.idle': 'Sobald der Ausdruck gültig ist, erscheinen hier die nächsten Ausführungen', 'runs.err': 'Der Ausdruck ist ungültig – keine Ausführungszeiten berechenbar',
+      'runs.none': 'Bis {0} gibt es keine passende Ausführung. Prüfen Sie, ob das Datum existiert (z. B. 30. Februar)',
+      'runs.partial': 'Bis {0} nur {1} Ausführungen gefunden',
+      'badge.idle': 'Wartet', 'badge.ok': 'Gültig', 'badge.err': 'Fehler',
+      'msg.ok': '{0}-Syntax · nächste Ausführung {1}', 'msg.none': '{0}-Syntax · keine Ausführung bis {1}',
+      'err.fields': '5, 6 oder 7 Felder erwartet, {0} gefunden', 'err.fieldsDialect': '{0}-Syntax benötigt {1} Felder, {2} gefunden',
+      'err.macro': 'Unbekanntes Makro „{0}“. Möglich sind @yearly, @annually, @monthly, @weekly, @daily, @midnight und @hourly',
+      'err.reboot': '„@reboot“ läuft nur beim Start; es gibt keinen Zeitplan zu berechnen',
+      'err.unknown': 'Feld „{0}“: „{1}“ ist unbekannt', 'err.range': 'Feld „{0}“: „{1}“ liegt außerhalb von {2}–{3}',
+      'err.reversed': 'Feld „{0}“: Der Bereich „{1}“ beginnt nach seinem Ende', 'err.step': 'Feld „{0}“: Die Schrittweite in „{1}“ muss zwischen 1 und {2} liegen',
+      'err.empty': 'Feld „{0}“: „{1}“ enthält einen leeren Listeneintrag',
+      'err.special': 'Feld „{0}“: Die Unix-Syntax unterstützt „{1}“ nicht; L / W / # erfordern Spring oder Quartz',
+      'err.qmark': 'Feld „{0}“: „{1}“ ist nur in den Feldern Tag im Monat und Wochentag erlaubt', 'err.qmarkUnix': 'Feld „{0}“: Die Unix-Syntax unterstützt „{1}“ nicht; bitte * verwenden',
+      'err.quartzQ': 'Quartz-Syntax: Genau eines der Felder „{0}“ ({1}) und „{2}“ ({3}) muss ? sein',
+      'err.nth': 'Feld „{0}“: Die Zahl nach # in „{1}“ muss zwischen 1 und 5 liegen'
+    }
+  };
+
+  const PRESETS = [
+    ['p.everyMin', '* * * * *'], ['p.every5', '*/5 * * * *'], ['p.hourly', '0 * * * *'], ['p.daily', '0 0 * * *'],
+    ['p.weekday930', '30 9 * * 1-5'], ['p.mon8', '0 8 * * MON'], ['p.month1', '0 0 1 * *'],
+    ['p.monthLast', '0 59 23 L * ?', 'quartz'], ['p.fri3', '0 0 10 ? * 6#3', 'quartz'],
+    ['p.spring30s', '*/30 * * * * *'], ['p.yearly', '@yearly']
+  ];
+  const MACROS = {
+    yearly: ['0 0 1 1 *', '0 0 0 1 1 *', '0 0 0 1 1 ?'],
+    monthly: ['0 0 1 * *', '0 0 0 1 * *', '0 0 0 1 * ?'],
+    weekly: ['0 0 * * 0', '0 0 0 * * 0', '0 0 0 ? * 1'],
+    daily: ['0 0 * * *', '0 0 0 * * *', '0 0 0 * * ?'],
+    hourly: ['0 * * * *', '0 0 * * * *', '0 0 * * * ?']
+  };
+  const MACRO_ALIAS = { annually: 'yearly', midnight: 'daily' };
+  const LAYOUT = {
+    unix: ['min', 'hour', 'dom', 'mon', 'dow'],
+    spring: ['sec', 'min', 'hour', 'dom', 'mon', 'dow'],
+    quartz: ['sec', 'min', 'hour', 'dom', 'mon', 'dow', 'year']
+  };
+  const BOUNDS = { sec: [0, 59], min: [0, 59], hour: [0, 23], dom: [1, 31], mon: [1, 12], year: [1970, 2099] };
+  const DIALECT_NAME = { unix: 'Unix', spring: 'Spring', quartz: 'Quartz' };
+  const MON_NAMES = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  const DOW_NAMES = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  const KEY = 'toolbox-cron-';
+  const SEARCH_YEARS = 10;
+
+  const $ = (id) => document.getElementById(id);
+  const input = $('expr'), selDialect = $('selDialect'), selTz = $('selTz'), selCount = $('selCount'), selPreset = $('selPreset');
+  const store = {
+    get(k) { try { return localStorage.getItem(KEY + k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(KEY + k, v); } catch (e) { /* 存储不可用时忽略 */ } }
+  };
+
+  let timer = null;
+  const page = Toolbox.initPage({ current: 'cron', text: TEXT, onLang: () => { fillPresets(); run(); } });
+  const tr = page.tr;
+
+  // ===== 解析 =====
+  function fail(key, ...args) {
+    const e = new Error(tr(key, ...args));
+    e.cron = true;
+    throw e;
+  }
+
+  function fieldDef(key, dialect) {
+    if (key === 'dow') return dialect === 'quartz' ? { key, min: 1, max: 7, top: 7 } : { key, min: 0, max: 7, top: 6 };
+    return { key, min: BOUNDS[key][0], max: BOUNDS[key][1], top: BOUNDS[key][1] };
+  }
+
+  const fname = (def) => tr('f.' + def.key);
+  // 星期统一换算为 0–6（0 = 周日）
+  const norm = (def, v) => (def.key !== 'dow' ? v : def.min === 1 ? v - 1 : v % 7);
+
+  function toNumber(def, s, item) {
+    let v;
+    if (/^\d+$/.test(s)) v = Number(s);
+    else if (def.key === 'mon' && MON_NAMES.includes(s)) v = MON_NAMES.indexOf(s) + 1;
+    else if (def.key === 'dow' && DOW_NAMES.includes(s)) v = DOW_NAMES.indexOf(s) + def.min;
+    else fail('err.unknown', fname(def), item);
+    if (v < def.min || v > def.max) fail('err.range', fname(def), item, def.min, def.max);
+    return v;
+  }
+
+  function parseRange(def, item, values) {
+    const parts = item.split('/');
+    if (parts.length > 2) fail('err.unknown', fname(def), item);
+    const [base, stepStr] = parts;
+    const span = def.top - def.min + 1;
+    let step = 1;
+    if (stepStr !== undefined) {
+      step = /^\d+$/.test(stepStr) ? Number(stepStr) : 0;
+      if (step < 1 || step > span) fail('err.step', fname(def), item, span);
+    }
+    let lo, hi;
+    if (base === '*') {
+      lo = def.min;
+      hi = def.top;
+    } else {
+      const ends = base.split('-');
+      if (ends.length > 2 || ends.some((p) => !p)) fail('err.unknown', fname(def), item);
+      lo = toNumber(def, ends[0], item);
+      hi = ends.length === 2 ? toNumber(def, ends[1], item) : stepStr !== undefined ? Math.max(def.top, lo) : lo;
+      if (lo > hi) fail('err.reversed', fname(def), item);
+    }
+    for (let v = lo; v <= hi; v += step) values.add(norm(def, v));
+  }
+
+  function parseSpecial(def, item, dialect) {
+    const guard = () => { if (dialect === 'unix') fail('err.special', fname(def), item); };
+    let m;
+    if (def.key === 'dom') {
+      if (item === 'L' || item === 'LW') { guard(); return { t: item, n: 0 }; }
+      if ((m = /^L-(\d+)$/.exec(item))) {
+        guard();
+        if (Number(m[1]) > 30) fail('err.range', fname(def), item, 0, 30);
+        return { t: 'L', n: Number(m[1]) };
+      }
+      if ((m = /^(\d+)W$/.exec(item))) {
+        guard();
+        const d = Number(m[1]);
+        if (d < 1 || d > 31) fail('err.range', fname(def), item, 1, 31);
+        return { t: 'W', d };
+      }
+    }
+    if (def.key === 'dow') {
+      if (item === 'L') { guard(); return { t: 'val', v: 6 }; }
+      if ((m = /^([A-Z0-9]+)L$/.exec(item))) {
+        guard();
+        return { t: 'lastDow', w: norm(def, toNumber(def, m[1], item)) };
+      }
+      if ((m = /^([A-Z0-9]+)#(\d+)$/.exec(item))) {
+        guard();
+        const w = norm(def, toNumber(def, m[1], item));
+        const k = Number(m[2]);
+        if (k < 1 || k > 5) fail('err.nth', fname(def), item);
+        return { t: 'nth', w, k };
+      }
+    }
+    return null;
+  }
+
+  function parseField(def, token, dialect) {
+    const f = { def, token, star: token === '*', any: token === '?', values: new Set(), specials: [] };
+    if (f.any) {
+      if (def.key !== 'dom' && def.key !== 'dow') fail('err.qmark', fname(def), token);
+      if (dialect === 'unix') fail('err.qmarkUnix', fname(def), token);
+      return f;
+    }
+    token.split(',').forEach((item) => {
+      if (!item) fail('err.empty', fname(def), token);
+      const sp = parseSpecial(def, item, dialect);
+      if (!sp) parseRange(def, item, f.values);
+      else if (sp.t === 'val') f.values.add(sp.v);
+      else f.specials.push(sp);
+    });
+    return f;
+  }
+
+  function resolveDialect(choice, n) {
+    if (choice === 'auto') {
+      const d = { 5: 'unix', 6: 'spring', 7: 'quartz' }[n];
+      if (!d) fail('err.fields', n);
+      return d;
+    }
+    const need = { unix: [5], spring: [6], quartz: [6, 7] }[choice];
+    if (!need.includes(n)) fail('err.fieldsDialect', DIALECT_NAME[choice], need.join('/'), n);
+    return choice;
+  }
+
+  function parse(raw, choice) {
+    let text = raw.trim();
+    let macro = null;
+    if (text.startsWith('@')) {
+      const name = text.slice(1).toLowerCase();
+      if (name === 'reboot') fail('err.reboot');
+      const key = MACRO_ALIAS[name] || name;
+      if (!MACROS[key]) fail('err.macro', text);
+      text = MACROS[key][{ spring: 1, quartz: 2 }[choice] || 0];
+      macro = '@' + name + ' → ' + text;
+    }
+    const tokens = text.toUpperCase().split(/\s+/);
+    const dialect = resolveDialect(choice, tokens.length);
+    const keys = LAYOUT[dialect].slice(0, tokens.length);
+    const fields = keys.map((k, i) => parseField(fieldDef(k, dialect), tokens[i], dialect));
+    const by = {};
+    fields.forEach((f) => { by[f.def.key] = f; });
+    if (dialect === 'quartz' && by.dom.any === by.dow.any) {
+      fail('err.quartzQ', tr('f.dom'), by.dom.token, tr('f.dow'), by.dow.token);
+    }
+    const sorted = (f, fallback) => (f ? [...f.values].sort((a, b) => a - b) : fallback);
+    const restricted = (f) => !f.star && !f.any;
+    // Vixie cron：任一日字段以 * 开头（含 */n）就按“同时满足”处理，只有都不以 * 开头才取并集
+    const unixRestricted = (f) => !f.token.startsWith('*');
+    return {
+      dialect, auto: choice === 'auto', macro, fields, by,
+      normalized: tokens.join(' '),
+      secs: sorted(by.sec, [0]), mins: sorted(by.min), hours: sorted(by.hour),
+      mons: by.mon.star ? null : by.mon.values,
+      years: by.year && !by.year.star ? by.year.values : null,
+      either: dialect === 'unix' && unixRestricted(by.dom) && unixRestricted(by.dow),
+      both: dialect === 'spring' && restricted(by.dom) && restricted(by.dow)
+    };
+  }
+
+  // ===== 计算执行时间 =====
+  const weekday = (y, m, d) => new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const daysIn = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+
+  function lastWorkday(y, m, dim) {
+    const w = weekday(y, m, dim);
+    return w === 6 ? dim - 1 : w === 0 ? dim - 2 : dim;
+  }
+
+  // Quartz 规则：就近的工作日，但不跨月
+  function nearestWorkday(y, m, n, dim) {
+    if (n > dim) return -1;
+    const w = weekday(y, m, n);
+    if (w === 6) return n === 1 ? 3 : n - 1;
+    if (w === 0) return n === dim ? n - 2 : n + 1;
+    return n;
+  }
+
+  function domMatches(f, y, m, d, dim) {
+    if (f.star || f.any || f.values.has(d)) return true;
+    return f.specials.some((sp) => (sp.t === 'L' ? d === dim - sp.n
+      : sp.t === 'LW' ? d === lastWorkday(y, m, dim)
+        : d === nearestWorkday(y, m, sp.d, dim)));
+  }
+
+  function dowMatches(f, d, dim, w) {
+    if (f.star || f.any || f.values.has(w)) return true;
+    return f.specials.some((sp) => sp.w === w && (sp.t === 'lastDow' ? d + 7 > dim : Math.ceil(d / 7) === sp.k));
+  }
+
+  function dayMatches(spec, y, m, d, dim) {
+    const a = domMatches(spec.by.dom, y, m, d, dim);
+    const b = dowMatches(spec.by.dow, d, dim, weekday(y, m, d));
+    return spec.either ? a || b : a && b;
+  }
+
+  function collectDay(spec, y, m, d, nowMs, utc, runs, count) {
+    for (const h of spec.hours) {
+      for (const mi of spec.mins) {
+        for (const s of spec.secs) {
+          const date = utc ? new Date(Date.UTC(y, m - 1, d, h, mi, s)) : new Date(y, m - 1, d, h, mi, s);
+          // 夏令时跳过的本地时间不存在，丢弃
+          if (!utc && (date.getDate() !== d || date.getHours() !== h || date.getMinutes() !== mi)) continue;
+          const t = date.getTime();
+          if (t <= nowMs) continue;
+          runs.push({ t, y, m, d, h, mi, s, w: weekday(y, m, d) });
+          if (runs.length >= count) return;
+        }
+      }
+    }
+  }
+
+  function nextRuns(spec, nowMs, count, utc) {
+    const now = new Date(nowMs);
+    let y = utc ? now.getUTCFullYear() : now.getFullYear();
+    let m = (utc ? now.getUTCMonth() : now.getMonth()) + 1;
+    let d = utc ? now.getUTCDate() : now.getDate();
+    const endYear = spec.years ? Math.max(...spec.years) : y + SEARCH_YEARS;
+    const runs = [];
+    while (y <= endYear && runs.length < count) {
+      if (spec.years && !spec.years.has(y)) { y++; m = 1; d = 1; continue; }
+      const dim = daysIn(y, m);
+      if ((spec.mons && !spec.mons.has(m)) || d > dim) {
+        d = 1;
+        if (++m > 12) { m = 1; y++; }
+        continue;
+      }
+      if (dayMatches(spec, y, m, d, dim)) collectDay(spec, y, m, d, nowMs, utc, runs, count);
+      d++;
+    }
+    return { runs, endYear };
+  }
+
+  // ===== 文案 =====
+  const nameCache = {};
+  function names(kind, style) {
+    const id = page.lang + kind + style;
+    if (!nameCache[id]) {
+      const fmt = new Intl.DateTimeFormat(page.lang, { [kind]: style, timeZone: 'UTC' });
+      const n = kind === 'weekday' ? 7 : 12;
+      nameCache[id] = Array.from({ length: n }, (_, i) => fmt.format(kind === 'weekday' ? Date.UTC(2023, 0, 1 + i) : Date.UTC(2023, i, 1)));
+    }
+    return nameCache[id];
+  }
+  const wdName = (w) => names('weekday', tr('wdStyle'))[w];
+
+  // 连续 3 个以上合并为 a–b
+  function joinRuns(vals, label) {
+    const out = [];
+    for (let i = 0; i < vals.length;) {
+      let j = i;
+      while (j + 1 < vals.length && vals[j + 1] === vals[j] + 1) j++;
+      if (j - i >= 2) out.push(label(vals[i]) + '–' + label(vals[j]));
+      else for (let k = i; k <= j; k++) out.push(label(vals[k]));
+      i = j + 1;
+    }
+    return out.join(', ');
+  }
+
+  function describeNumbers(vals) {
+    const n = vals.length;
+    const step = n > 1 ? vals[1] - vals[0] : 0;
+    const even = n >= 6 && vals.every((v, i) => i === 0 || v - vals[i - 1] === step);
+    const text = even && step > 1 ? [vals[0], vals[1], vals[2], '…', vals[n - 1]].join(', ') : joinRuns(vals, String);
+    return n >= 4 ? text + tr('desc.count', n) : text;
+  }
+
+  function describeSpecial(sp) {
+    if (sp.t === 'L') return sp.n ? tr('desc.Ln', sp.n, sp.n + 1) : tr('desc.L');
+    if (sp.t === 'LW') return tr('desc.LW');
+    if (sp.t === 'W') return tr('desc.W', sp.d);
+    if (sp.t === 'lastDow') return tr('desc.lastDow', wdName(sp.w));
+    return tr('desc.nth', tr('ord').split('|')[sp.k - 1], wdName(sp.w));
+  }
+
+  function describe(f) {
+    if (f.any) return tr('desc.any');
+    if (f.star) return tr('desc.every', f.def.min, f.def.max);
+    const vals = [...f.values].sort((a, b) => a - b);
+    const parts = [];
+    if (vals.length) {
+      if (f.def.key === 'mon') parts.push(joinRuns(vals, (v) => names('month', 'short')[v - 1]));
+      else if (f.def.key === 'dow') parts.push(joinRuns(vals, (v) => names('weekday', 'short')[v]));
+      else parts.push(describeNumbers(vals));
+    }
+    f.specials.forEach((sp) => parts.push(describeSpecial(sp)));
+    return parts.join(', ');
+  }
+
+  const p2 = (n) => String(n).padStart(2, '0');
+
+  function relTime(ms) {
+    const rtf = new Intl.RelativeTimeFormat(page.lang, { numeric: 'always' });
+    const s = Math.round(ms / 1000);
+    const steps = [['second', 1, 60], ['minute', 60, 60], ['hour', 3600, 24], ['day', 86400, 30], ['month', 2629800, 12]];
+    for (const [unit, size, limit] of steps) {
+      const v = Math.round(s / size);
+      if (Math.abs(v) < limit) return rtf.format(v, unit);
+    }
+    return rtf.format(Math.round(s / 31557600), 'year');
+  }
+
+  // ===== 渲染 =====
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function row(label, value, plain) {
+    const tr_ = el('tr');
+    tr_.append(el('th', '', label), el('td', plain ? 'plain' : '', value));
+    return tr_;
+  }
+
+  function setStatus(kind, message) {
+    const badge = $('badge');
+    badge.className = 'badge ' + kind;
+    badge.textContent = tr({ idle: 'badge.idle', ok: 'badge.ok', warn: 'badge.ok', err: 'badge.err' }[kind]);
+    $('msg').className = 'status-msg' + (kind === 'err' ? ' error' : kind === 'warn' ? ' note' : '');
+    $('msg').textContent = message || '';
+  }
+
+  function renderFields(spec) {
+    const sum = el('table', 'kv');
+    sum.append(row(tr('sum.dialect'), tr('sum.dialectVal', DIALECT_NAME[spec.dialect], spec.fields.length) + (spec.auto ? tr('sum.auto') : ''), true));
+    if (spec.macro) sum.append(row(tr('sum.macro'), spec.macro));
+    sum.append(row(tr('sum.expr'), spec.normalized));
+    if (spec.either || spec.both) sum.append(row(tr('sum.rule'), tr(spec.either ? 'rule.or' : 'rule.and'), true));
+    const dowNum = spec.dialect === 'quartz' ? tr('dow.quartz', wdName(0), wdName(6)) : tr('dow.unix', wdName(0));
+    sum.append(row(tr('sum.dow'), dowNum, true));
+
+    const table = el('table', 'kv');
+    spec.fields.forEach((f) => {
+      const tr_ = el('tr');
+      const td = el('td', 'plain');
+      const box = el('div', 'field');
+      box.append(el('span', 'tok', f.token), el('span', 'mean', describe(f)));
+      td.append(box);
+      tr_.append(el('th', '', fname(f.def)), td);
+      table.append(tr_);
+    });
+    $('fieldsBody').replaceChildren(sum, table);
+    $('fieldsMeta').textContent = DIALECT_NAME[spec.dialect];
+  }
+
+  function renderRuns(result, count, nowMs) {
+    const body = $('runsBody');
+    const { runs, endYear } = result;
+    const nodes = [];
+    if (!runs.length) nodes.push(el('div', 'box warn', tr('runs.none', endYear)));
+    else if (runs.length < count) nodes.push(el('div', 'box warn', tr('runs.partial', endYear, runs.length)));
+    if (runs.length) {
+      const list = el('ol', 'runs');
+      runs.forEach((r, i) => {
+        const li = el('li', i === 0 ? 'first' : '');
+        li.append(
+          el('span', 'idx', String(i + 1)),
+          el('span', 'when', r.y + '-' + p2(r.m) + '-' + p2(r.d) + ' ' + p2(r.h) + ':' + p2(r.mi) + ':' + p2(r.s)),
+          el('span', 'wd', names('weekday', 'short')[r.w]),
+          el('span', 'rel', relTime(r.t - nowMs))
+        );
+        list.append(li);
+      });
+      nodes.push(list);
+    }
+    body.replaceChildren(...nodes);
+  }
+
+  function zoneLabel() {
+    if (selTz.value === 'utc') return 'UTC';
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || tr('tz.local');
+  }
+
+  function run() {
+    $('runsMeta').textContent = zoneLabel();
+    const raw = input.value.trim();
+    if (!raw) {
+      $('fieldsBody').replaceChildren(el('p', 'hint', tr('hint.idle')));
+      $('runsBody').replaceChildren(el('p', 'hint', tr('runs.idle')));
+      $('fieldsMeta').textContent = '';
+      setStatus('idle');
+      return;
+    }
+    let spec;
+    try {
+      spec = parse(raw, selDialect.value);
+    } catch (e) {
+      if (!e.cron) throw e;
+      $('fieldsBody').replaceChildren(el('div', 'box err', e.message));
+      $('runsBody').replaceChildren(el('p', 'hint', tr('runs.err')));
+      $('fieldsMeta').textContent = '';
+      setStatus('err', e.message);
+      return;
+    }
+    renderFields(spec);
+    const nowMs = Date.now();
+    const count = Number(selCount.value);
+    const result = nextRuns(spec, nowMs, count, selTz.value === 'utc');
+    renderRuns(result, count, nowMs);
+    const name = DIALECT_NAME[spec.dialect];
+    if (result.runs.length) setStatus('ok', tr('msg.ok', name, relTime(result.runs[0].t - nowMs)));
+    else setStatus('warn', tr('msg.none', name, result.endYear));
+  }
+
+  function fillPresets() {
+    selPreset.replaceChildren(new Option(tr('preset.label'), ''), ...PRESETS.map((p, i) => new Option(tr(p[0]) + ' — ' + p[1], String(i))));
+    selPreset.value = '';
+  }
+
+  function save() {
+    store.set('expr', input.value);
+    store.set('dialect', selDialect.value);
+    store.set('tz', selTz.value);
+    store.set('count', selCount.value);
+  }
+
+  function restore() {
+    const expr = store.get('expr');
+    input.value = expr === null ? '30 9 * * 1-5' : expr;
+    [['dialect', selDialect], ['tz', selTz], ['count', selCount]].forEach(([k, sel]) => {
+      const v = store.get(k);
+      if (v !== null && [...sel.options].some((o) => o.value === v)) sel.value = v;
+    });
+  }
+
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { save(); run(); }, 200);
+  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(timer); save(); run(); } });
+  [selDialect, selTz, selCount].forEach((sel) => sel.addEventListener('change', () => { save(); run(); }));
+  selPreset.addEventListener('change', () => {
+    const p = PRESETS[Number(selPreset.value)];
+    selPreset.value = '';
+    if (!p) return;
+    input.value = p[1];
+    selDialect.value = p[2] || 'auto';
+    save();
+    run();
+  });
+  $('btnCopy').addEventListener('click', () => page.copy(input.value.trim()));
+  setInterval(run, 30000);
+
+  restore();
+  fillPresets();
+  run();
+})();
+</script>
+</body>
+</html>

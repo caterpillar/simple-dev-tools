@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Base64</title>
+<meta name="description" content="本地离线 Base64 编码与解码：支持 UTF-8 中文、URL 安全格式、Data URL 与文件转换。">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="toolbox.css">
+<script src="toolbox-nav.js"></script>
+<style>
+  .file-card { display: flex; flex-direction: column; gap: 12px; padding: 20px; }
+  .file-card h3 { margin: 0; font-size: 14px; font-weight: 600; word-break: break-all; }
+  .file-card .kv { max-width: 520px; }
+  .file-card button { align-self: flex-start; }
+  body.dragging .workspace { outline: 2px dashed var(--accent); outline-offset: -4px; }
+</style>
+</head>
+<body>
+<header class="titlebar">
+  <nav class="tool-tabs" id="toolTabs" data-current="base64"></nav>
+  <div class="titlebar-right" id="toolboxControls"></div>
+</header>
+
+<div class="toolbar">
+  <span class="seg" role="group" data-i18n-aria="aria.mode">
+    <button type="button" id="modeEncode" data-mode="encode" aria-pressed="true" data-i18n="mode.encode">编码</button>
+    <button type="button" id="modeDecode" data-mode="decode" aria-pressed="false" data-i18n="mode.decode">解码</button>
+  </span>
+  <span class="tb-sep"></span>
+  <label class="chk" data-i18n-title="tip.urlSafe"><input type="checkbox" id="optUrlSafe"><span data-i18n="opt.urlSafe">URL 安全</span></label>
+  <label class="chk" data-i18n-title="tip.noPad"><input type="checkbox" id="optNoPad"><span data-i18n="opt.noPad">去掉填充</span></label>
+  <label class="chk" data-i18n-title="tip.dataUrl"><input type="checkbox" id="optDataUrl"><span data-i18n="opt.dataUrl">Data URL</span></label>
+  <span class="tb-sep"></span>
+  <button type="button" id="btnOpen" data-i18n="btn.openFile" data-i18n-title="tip.openFile">打开文件</button>
+  <button type="button" id="btnSample" data-i18n="btn.sample" data-i18n-title="tip.sample">示例</button>
+  <button type="button" id="btnSwap" data-i18n="btn.swap" data-i18n-title="tip.swap">交换</button>
+  <button type="button" id="btnClear" data-i18n="btn.clear" data-i18n-title="tip.clear">清空</button>
+  <span class="tb-sep"></span>
+  <button type="button" id="btnCopy" data-i18n="btn.copyOut">复制结果</button>
+  <button type="button" id="btnDownload" data-i18n="btn.dlOut">下载结果</button>
+</div>
+
+<main class="workspace">
+  <section class="pane">
+    <div class="pane-head"><span data-i18n="pane.input">输入</span><span class="meta" id="inMeta"></span></div>
+    <div class="pane-body" id="inBody">
+      <textarea class="code" id="input" spellcheck="false" autocomplete="off" data-i18n-aria="pane.input"></textarea>
+      <div class="file-card" id="fileCard" hidden>
+        <h3 id="fileName"></h3>
+        <table class="kv">
+          <tr><th data-i18n="file.size"></th><td id="fileSize"></td></tr>
+          <tr><th data-i18n="file.type"></th><td id="fileType"></td></tr>
+        </table>
+        <button type="button" id="btnUseText" data-i18n="btn.useText">改为输入文本</button>
+      </div>
+    </div>
+  </section>
+  <section class="pane">
+    <div class="pane-head"><span data-i18n="pane.output">输出</span><span class="meta" id="outMeta"></span></div>
+    <div class="pane-body">
+      <textarea class="code" id="output" readonly spellcheck="false" data-i18n-aria="pane.output"></textarea>
+    </div>
+  </section>
+</main>
+
+<footer class="status">
+  <span class="badge idle" id="badge"></span>
+  <span class="status-msg" id="msg"></span>
+</footer>
+<input type="file" id="file">
+
+<script>
+(function () {
+  'use strict';
+
+  const TEXT = {
+    'zh-CN': {
+      'mode.encode': '编码', 'mode.decode': '解码', 'aria.mode': '转换方向',
+      'opt.urlSafe': 'URL 安全', 'tip.urlSafe': '用 - 和 _ 代替 + 和 /，可直接放进 URL 或文件名',
+      'opt.noPad': '去掉填充', 'tip.noPad': '去掉末尾用于补位的 =',
+      'opt.dataUrl': 'Data URL', 'tip.dataUrl': '输出带 data:…;base64, 前缀，可直接用于 img 的 src',
+      'btn.openFile': '打开文件', 'tip.openFile': '把本地文件编码为 Base64（也可拖入窗口）',
+      'tip.sample': '载入示例', 'btn.swap': '交换', 'tip.swap': '把输出作为新的输入，并切换编码 / 解码',
+      'btn.copyOut': '复制结果', 'btn.dlOut': '下载结果', 'tip.clear': '清空输入',
+      'pane.input': '输入', 'pane.output': '输出',
+      'ph.encode': '输入要编码的文本，或把文件拖进窗口…', 'ph.decode': '粘贴 Base64 文本，也支持以 data:…;base64, 开头的 Data URL…',
+      'meta.chars': '{0} 字符', 'meta.file': '文件 · {0}', 'btn.useText': '改为输入文本',
+      'file.size': '大小', 'file.type': '类型',
+      'badge.idle': '待输入', 'badge.ok': '成功', 'badge.err': '无效', 'badge.bin': '二进制',
+      'msg.encoded': '已编码：{0} → {1} 字符', 'msg.decoded': '已解码为文本：{0}',
+      'msg.binary': '解码结果是二进制数据（{0}），右侧为十六进制预览，可点“下载结果”保存',
+      'msg.badChar': '第 {0} 个字符 {1} 不是合法的 Base64 字符', 'msg.badPad': '填充符 = 只能出现在末尾',
+      'msg.badLen': '长度不正确：有效字符 {0} 个，Base64 长度不能是 4 的倍数加 1', 'msg.badDataUrl': '这个 Data URL 不是 Base64 编码',
+      'msg.truncated': '结果较大（{0}），界面只显示开头部分；复制与下载均为完整内容',
+      'hex.more': '… 仅预览前 {0} 字节，共 {1} 字节',
+      'toast.binCopy': '二进制结果无法复制为文本，请使用“下载结果”', 'toast.binSwap': '二进制结果不能作为文本输入',
+      sample: '你好，世界！Hello, Base64 👋'
+    },
+    'zh-TW': {
+      'mode.encode': '編碼', 'mode.decode': '解碼', 'aria.mode': '轉換方向',
+      'opt.urlSafe': 'URL 安全', 'tip.urlSafe': '用 - 與 _ 取代 + 與 /，可直接放進 URL 或檔名',
+      'opt.noPad': '移除填充', 'tip.noPad': '移除結尾用於補位的 =',
+      'opt.dataUrl': 'Data URL', 'tip.dataUrl': '輸出帶 data:…;base64, 前綴，可直接用於 img 的 src',
+      'btn.openFile': '開啟檔案', 'tip.openFile': '將本機檔案編碼為 Base64（也可拖入視窗）',
+      'tip.sample': '載入範例', 'btn.swap': '交換', 'tip.swap': '把輸出作為新的輸入，並切換編碼 / 解碼',
+      'btn.copyOut': '複製結果', 'btn.dlOut': '下載結果', 'tip.clear': '清空輸入',
+      'pane.input': '輸入', 'pane.output': '輸出',
+      'ph.encode': '輸入要編碼的文字，或把檔案拖進視窗…', 'ph.decode': '貼上 Base64 文字，也支援以 data:…;base64, 開頭的 Data URL…',
+      'meta.chars': '{0} 字元', 'meta.file': '檔案 · {0}', 'btn.useText': '改為輸入文字',
+      'file.size': '大小', 'file.type': '類型',
+      'badge.idle': '待輸入', 'badge.ok': '成功', 'badge.err': '無效', 'badge.bin': '二進位',
+      'msg.encoded': '已編碼：{0} → {1} 字元', 'msg.decoded': '已解碼為文字：{0}',
+      'msg.binary': '解碼結果為二進位資料（{0}），右側為十六進位預覽，可點「下載結果」儲存',
+      'msg.badChar': '第 {0} 個字元 {1} 不是合法的 Base64 字元', 'msg.badPad': '填充符 = 只能出現在結尾',
+      'msg.badLen': '長度不正確：有效字元 {0} 個，Base64 長度不能是 4 的倍數加 1', 'msg.badDataUrl': '這個 Data URL 不是 Base64 編碼',
+      'msg.truncated': '結果較大（{0}），介面只顯示開頭部分；複製與下載皆為完整內容',
+      'hex.more': '… 僅預覽前 {0} 位元組，共 {1} 位元組',
+      'toast.binCopy': '二進位結果無法複製為文字，請使用「下載結果」', 'toast.binSwap': '二進位結果不能作為文字輸入',
+      sample: '你好，世界！Hello, Base64 👋'
+    },
+    en: {
+      'mode.encode': 'Encode', 'mode.decode': 'Decode', 'aria.mode': 'Direction',
+      'opt.urlSafe': 'URL-safe', 'tip.urlSafe': 'Use - and _ instead of + and /, safe for URLs and file names',
+      'opt.noPad': 'No padding', 'tip.noPad': 'Remove the trailing = padding',
+      'opt.dataUrl': 'Data URL', 'tip.dataUrl': 'Prefix with data:…;base64, so it can be used directly as an img src',
+      'btn.openFile': 'Open file', 'tip.openFile': 'Encode a local file to Base64 (or drop it on the window)',
+      'tip.sample': 'Load sample', 'btn.swap': 'Swap', 'tip.swap': 'Use the output as the new input and flip encode / decode',
+      'btn.copyOut': 'Copy result', 'btn.dlOut': 'Download result', 'tip.clear': 'Clear input',
+      'pane.input': 'Input', 'pane.output': 'Output',
+      'ph.encode': 'Type text to encode, or drop a file on the window…', 'ph.decode': 'Paste Base64 text — Data URLs starting with data:…;base64, work too…',
+      'meta.chars': '{0} chars', 'meta.file': 'File · {0}', 'btn.useText': 'Type text instead',
+      'file.size': 'Size', 'file.type': 'Type',
+      'badge.idle': 'Waiting', 'badge.ok': 'Done', 'badge.err': 'Invalid', 'badge.bin': 'Binary',
+      'msg.encoded': 'Encoded: {0} → {1} chars', 'msg.decoded': 'Decoded to text: {0}',
+      'msg.binary': 'The result is binary data ({0}). A hex preview is shown on the right — use “Download result” to save it',
+      'msg.badChar': 'Character {0} ({1}) is not valid Base64', 'msg.badPad': 'Padding = may only appear at the end',
+      'msg.badLen': 'Invalid length: {0} Base64 characters; a length of 4n+1 is impossible', 'msg.badDataUrl': 'This Data URL is not Base64-encoded',
+      'msg.truncated': 'Large result ({0}); only the beginning is shown. Copy and download use the full content',
+      'hex.more': '… previewing the first {0} of {1} bytes',
+      'toast.binCopy': 'Binary results cannot be copied as text — use Download', 'toast.binSwap': 'Binary results cannot be used as text input',
+      sample: 'Hello, world! 你好 Base64 👋'
+    },
+    ja: {
+      'mode.encode': 'エンコード', 'mode.decode': 'デコード', 'aria.mode': '変換方向',
+      'opt.urlSafe': 'URL セーフ', 'tip.urlSafe': '+ と / の代わりに - と _ を使い、URL やファイル名にそのまま使えます',
+      'opt.noPad': 'パディングなし', 'tip.noPad': '末尾の = を取り除きます',
+      'opt.dataUrl': 'Data URL', 'tip.dataUrl': 'data:…;base64, を付けて出力し、img の src にそのまま使えます',
+      'btn.openFile': 'ファイルを開く', 'tip.openFile': 'ローカルファイルを Base64 にエンコード（ウィンドウへのドロップも可）',
+      'tip.sample': 'サンプルを読み込む', 'btn.swap': '入れ替え', 'tip.swap': '出力を新しい入力にし、エンコード / デコードを切り替えます',
+      'btn.copyOut': '結果をコピー', 'btn.dlOut': '結果を保存', 'tip.clear': '入力をクリア',
+      'pane.input': '入力', 'pane.output': '出力',
+      'ph.encode': 'エンコードするテキストを入力、またはファイルをドロップ…', 'ph.decode': 'Base64 テキストを貼り付け。data:…;base64, で始まる Data URL も可…',
+      'meta.chars': '{0} 文字', 'meta.file': 'ファイル · {0}', 'btn.useText': 'テキスト入力に戻す',
+      'file.size': 'サイズ', 'file.type': '種類',
+      'badge.idle': '入力待ち', 'badge.ok': '完了', 'badge.err': '無効', 'badge.bin': 'バイナリ',
+      'msg.encoded': 'エンコード完了：{0} → {1} 文字', 'msg.decoded': 'テキストにデコードしました：{0}',
+      'msg.binary': 'デコード結果はバイナリデータです（{0}）。右側は 16 進プレビューです。「結果を保存」でファイルにできます',
+      'msg.badChar': '{0} 文字目の {1} は Base64 として無効な文字です', 'msg.badPad': 'パディングの = は末尾にのみ置けます',
+      'msg.badLen': '長さが不正です：有効な文字は {0} 個。Base64 の長さが 4 の倍数 + 1 になることはありません', 'msg.badDataUrl': 'この Data URL は Base64 エンコードではありません',
+      'msg.truncated': '結果が大きいため（{0}）先頭のみ表示しています。コピーと保存は全体が対象です',
+      'hex.more': '… 全 {1} バイト中、先頭 {0} バイトをプレビュー',
+      'toast.binCopy': 'バイナリ結果はテキストとしてコピーできません。「結果を保存」を使ってください', 'toast.binSwap': 'バイナリ結果はテキスト入力にできません',
+      sample: 'こんにちは、世界！Hello, Base64 👋'
+    },
+    ko: {
+      'mode.encode': '인코딩', 'mode.decode': '디코딩', 'aria.mode': '변환 방향',
+      'opt.urlSafe': 'URL 안전', 'tip.urlSafe': '+ 와 / 대신 - 와 _ 를 사용해 URL 이나 파일 이름에 바로 쓸 수 있습니다',
+      'opt.noPad': '패딩 제거', 'tip.noPad': '끝에 붙는 = 패딩을 제거합니다',
+      'opt.dataUrl': 'Data URL', 'tip.dataUrl': 'data:…;base64, 접두사를 붙여 img 의 src 에 바로 사용할 수 있습니다',
+      'btn.openFile': '파일 열기', 'tip.openFile': '로컬 파일을 Base64 로 인코딩합니다 (창에 끌어다 놓아도 됩니다)',
+      'tip.sample': '예시 불러오기', 'btn.swap': '바꾸기', 'tip.swap': '출력을 새 입력으로 쓰고 인코딩 / 디코딩을 전환합니다',
+      'btn.copyOut': '결과 복사', 'btn.dlOut': '결과 저장', 'tip.clear': '입력 지우기',
+      'pane.input': '입력', 'pane.output': '출력',
+      'ph.encode': '인코딩할 텍스트를 입력하거나 파일을 끌어다 놓으세요…', 'ph.decode': 'Base64 텍스트를 붙여 넣으세요. data:…;base64, 로 시작하는 Data URL 도 됩니다…',
+      'meta.chars': '{0}자', 'meta.file': '파일 · {0}', 'btn.useText': '텍스트 입력으로 전환',
+      'file.size': '크기', 'file.type': '형식',
+      'badge.idle': '입력 대기', 'badge.ok': '완료', 'badge.err': '잘못됨', 'badge.bin': '바이너리',
+      'msg.encoded': '인코딩 완료: {0} → {1}자', 'msg.decoded': '텍스트로 디코딩했습니다: {0}',
+      'msg.binary': '디코딩 결과가 바이너리 데이터입니다({0}). 오른쪽은 16진수 미리보기이며 "결과 저장"으로 파일로 저장할 수 있습니다',
+      'msg.badChar': '{0}번째 문자 {1} 은(는) 올바른 Base64 문자가 아닙니다', 'msg.badPad': '패딩 = 은 끝에만 올 수 있습니다',
+      'msg.badLen': '길이가 올바르지 않습니다: 유효 문자 {0}개, Base64 길이는 4의 배수 + 1 이 될 수 없습니다', 'msg.badDataUrl': '이 Data URL 은 Base64 로 인코딩되지 않았습니다',
+      'msg.truncated': '결과가 커서({0}) 앞부분만 표시합니다. 복사와 저장은 전체 내용입니다',
+      'hex.more': '… 전체 {1}바이트 중 앞 {0}바이트 미리보기',
+      'toast.binCopy': '바이너리 결과는 텍스트로 복사할 수 없습니다. "결과 저장"을 사용하세요', 'toast.binSwap': '바이너리 결과는 텍스트 입력으로 쓸 수 없습니다',
+      sample: '안녕하세요, 세계! Hello, Base64 👋'
+    },
+    es: {
+      'mode.encode': 'Codificar', 'mode.decode': 'Decodificar', 'aria.mode': 'Dirección',
+      'opt.urlSafe': 'Seguro para URL', 'tip.urlSafe': 'Usa - y _ en lugar de + y /, válido en URL y nombres de archivo',
+      'opt.noPad': 'Sin relleno', 'tip.noPad': 'Quita el relleno = del final',
+      'opt.dataUrl': 'Data URL', 'tip.dataUrl': 'Añade el prefijo data:…;base64, para usarlo directamente como src de una imagen',
+      'btn.openFile': 'Abrir archivo', 'tip.openFile': 'Codifica un archivo local en Base64 (o suéltalo en la ventana)',
+      'tip.sample': 'Cargar ejemplo', 'btn.swap': 'Intercambiar', 'tip.swap': 'Usa la salida como nueva entrada y cambia codificar / decodificar',
+      'btn.copyOut': 'Copiar resultado', 'btn.dlOut': 'Descargar resultado', 'tip.clear': 'Vaciar la entrada',
+      'pane.input': 'Entrada', 'pane.output': 'Salida',
+      'ph.encode': 'Escribe el texto a codificar o suelta un archivo en la ventana…', 'ph.decode': 'Pega texto Base64; también sirven Data URL que empiezan por data:…;base64,…',
+      'meta.chars': '{0} caracteres', 'meta.file': 'Archivo · {0}', 'btn.useText': 'Escribir texto',
+      'file.size': 'Tamaño', 'file.type': 'Tipo',
+      'badge.idle': 'En espera', 'badge.ok': 'Listo', 'badge.err': 'No válido', 'badge.bin': 'Binario',
+      'msg.encoded': 'Codificado: {0} → {1} caracteres', 'msg.decoded': 'Decodificado como texto: {0}',
+      'msg.binary': 'El resultado son datos binarios ({0}). A la derecha hay una vista hexadecimal; usa «Descargar resultado» para guardarlo',
+      'msg.badChar': 'El carácter {0} ({1}) no es Base64 válido', 'msg.badPad': 'El relleno = solo puede ir al final',
+      'msg.badLen': 'Longitud no válida: {0} caracteres Base64; una longitud 4n+1 es imposible', 'msg.badDataUrl': 'Esta Data URL no está codificada en Base64',
+      'msg.truncated': 'Resultado grande ({0}); solo se muestra el principio. Copiar y descargar usan el contenido completo',
+      'hex.more': '… vista previa de los primeros {0} de {1} bytes',
+      'toast.binCopy': 'Un resultado binario no se puede copiar como texto; usa Descargar', 'toast.binSwap': 'Un resultado binario no puede usarse como entrada de texto',
+      sample: '¡Hola, mundo! Hello, Base64 👋'
+    },
+    fr: {
+      'mode.encode': 'Encoder', 'mode.decode': 'Décoder', 'aria.mode': 'Sens',
+      'opt.urlSafe': 'Compatible URL', 'tip.urlSafe': 'Utilise - et _ au lieu de + et /, utilisable dans les URL et noms de fichiers',
+      'opt.noPad': 'Sans remplissage', 'tip.noPad': 'Supprime le remplissage = final',
+      'opt.dataUrl': 'Data URL', 'tip.dataUrl': 'Ajoute le préfixe data:…;base64, pour l’utiliser directement comme src d’image',
+      'btn.openFile': 'Ouvrir un fichier', 'tip.openFile': 'Encode un fichier local en Base64 (ou déposez-le sur la fenêtre)',
+      'tip.sample': 'Charger un exemple', 'btn.swap': 'Inverser', 'tip.swap': 'Utilise la sortie comme nouvelle entrée et inverse encoder / décoder',
+      'btn.copyOut': 'Copier le résultat', 'btn.dlOut': 'Télécharger le résultat', 'tip.clear': 'Effacer l’entrée',
+      'pane.input': 'Entrée', 'pane.output': 'Sortie',
+      'ph.encode': 'Saisissez le texte à encoder, ou déposez un fichier sur la fenêtre…', 'ph.decode': 'Collez du Base64 ; les Data URL commençant par data:…;base64, sont acceptées…',
+      'meta.chars': '{0} caractères', 'meta.file': 'Fichier · {0}', 'btn.useText': 'Saisir du texte',
+      'file.size': 'Taille', 'file.type': 'Type',
+      'badge.idle': 'En attente', 'badge.ok': 'Terminé', 'badge.err': 'Invalide', 'badge.bin': 'Binaire',
+      'msg.encoded': 'Encodé : {0} → {1} caractères', 'msg.decoded': 'Décodé en texte : {0}',
+      'msg.binary': 'Le résultat est binaire ({0}). Un aperçu hexadécimal s’affiche à droite ; utilisez « Télécharger le résultat » pour l’enregistrer',
+      'msg.badChar': 'Le caractère {0} ({1}) n’est pas du Base64 valide', 'msg.badPad': 'Le remplissage = ne peut apparaître qu’à la fin',
+      'msg.badLen': 'Longueur invalide : {0} caractères Base64 ; une longueur 4n+1 est impossible', 'msg.badDataUrl': 'Cette Data URL n’est pas encodée en Base64',
+      'msg.truncated': 'Résultat volumineux ({0}) : seul le début est affiché. La copie et le téléchargement contiennent tout',
+      'hex.more': '… aperçu des {0} premiers octets sur {1}',
+      'toast.binCopy': 'Un résultat binaire ne peut pas être copié en texte ; utilisez Télécharger', 'toast.binSwap': 'Un résultat binaire ne peut pas servir d’entrée texte',
+      sample: 'Bonjour le monde ! Hello, Base64 👋'
+    },
+    de: {
+      'mode.encode': 'Kodieren', 'mode.decode': 'Dekodieren', 'aria.mode': 'Richtung',
+      'opt.urlSafe': 'URL-sicher', 'tip.urlSafe': 'Verwendet - und _ statt + und /, geeignet für URLs und Dateinamen',
+      'opt.noPad': 'Ohne Padding', 'tip.noPad': 'Entfernt das abschließende =-Padding',
+      'opt.dataUrl': 'Data-URL', 'tip.dataUrl': 'Mit Präfix data:…;base64, ausgeben – direkt als img-src verwendbar',
+      'btn.openFile': 'Datei öffnen', 'tip.openFile': 'Lokale Datei in Base64 kodieren (oder ins Fenster ziehen)',
+      'tip.sample': 'Beispiel laden', 'btn.swap': 'Tauschen', 'tip.swap': 'Ausgabe als neue Eingabe verwenden und Kodieren / Dekodieren umschalten',
+      'btn.copyOut': 'Ergebnis kopieren', 'btn.dlOut': 'Ergebnis speichern', 'tip.clear': 'Eingabe leeren',
+      'pane.input': 'Eingabe', 'pane.output': 'Ausgabe',
+      'ph.encode': 'Text zum Kodieren eingeben oder eine Datei ins Fenster ziehen…', 'ph.decode': 'Base64-Text einfügen – auch Data-URLs mit data:…;base64, funktionieren…',
+      'meta.chars': '{0} Zeichen', 'meta.file': 'Datei · {0}', 'btn.useText': 'Stattdessen Text eingeben',
+      'file.size': 'Größe', 'file.type': 'Typ',
+      'badge.idle': 'Wartet', 'badge.ok': 'Fertig', 'badge.err': 'Ungültig', 'badge.bin': 'Binär',
+      'msg.encoded': 'Kodiert: {0} → {1} Zeichen', 'msg.decoded': 'Als Text dekodiert: {0}',
+      'msg.binary': 'Das Ergebnis sind Binärdaten ({0}). Rechts steht eine Hex-Vorschau – mit „Ergebnis speichern“ als Datei sichern',
+      'msg.badChar': 'Zeichen {0} ({1}) ist kein gültiges Base64', 'msg.badPad': 'Padding = darf nur am Ende stehen',
+      'msg.badLen': 'Ungültige Länge: {0} Base64-Zeichen; eine Länge von 4n+1 ist unmöglich', 'msg.badDataUrl': 'Diese Data-URL ist nicht Base64-kodiert',
+      'msg.truncated': 'Großes Ergebnis ({0}); nur der Anfang wird angezeigt. Kopieren und Speichern nutzen den vollständigen Inhalt',
+      'hex.more': '… Vorschau der ersten {0} von {1} Bytes',
+      'toast.binCopy': 'Binäre Ergebnisse lassen sich nicht als Text kopieren – bitte speichern', 'toast.binSwap': 'Binäre Ergebnisse können nicht als Texteingabe dienen',
+      sample: 'Hallo Welt! Hello, Base64 👋'
+    }
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const input = $('input'), output = $('output');
+  const MAX_FILE = 30 * 1024 * 1024;
+  const MAX_SHOWN = 2000000;
+  const HEX_PREVIEW = 1024;
+  const EXT_BY_MIME = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'application/pdf': 'pdf', 'application/zip': 'zip', 'application/json': 'json', 'text/plain': 'txt' };
+
+  let mode = 'encode';
+  let file = null;
+  // 最近一次结果：text 为可复制文本；bytes/mime 用于下载
+  let result = { text: '', bytes: null, mime: '', binary: false };
+  let timer = null;
+
+  const page = Toolbox.initPage({ current: 'base64', text: TEXT, onLang: run });
+  const tr = page.tr;
+
+  function setStatus(kind, message, badgeKey) {
+    const badge = $('badge');
+    badge.className = 'badge ' + kind;
+    badge.textContent = tr(badgeKey || { idle: 'badge.idle', ok: 'badge.ok', err: 'badge.err', warn: 'badge.bin' }[kind]);
+    const msg = $('msg');
+    msg.className = 'status-msg' + (kind === 'err' ? ' error' : kind === 'warn' ? ' note' : '');
+    msg.textContent = message || '';
+  }
+
+  // 按 3 的倍数分块，避免大文件一次性拼接超长参数，且分块之间不产生 = 补位
+  function bytesToBase64(bytes) {
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 24576) out += btoa(String.fromCharCode.apply(null, bytes.subarray(i, i + 24576)));
+    return out;
+  }
+
+  // 浏览器只认标准字母表和补位的 Data URL，因此 Data URL 优先于 URL 安全 / 去掉填充
+  function encodeBytes(bytes, mime) {
+    const b64 = bytesToBase64(bytes);
+    if ($('optDataUrl').checked) return 'data:' + mime + ';base64,' + b64;
+    let out = b64;
+    if ($('optUrlSafe').checked) out = out.replace(/\+/g, '-').replace(/\//g, '_');
+    if ($('optNoPad').checked) out = out.replace(/=+$/, '');
+    return out;
+  }
+
+  // 宽松解码：忽略空白，兼容 URL 安全字符、缺失补位和 Data URL；返回 { bytes, mime } 或 { error }
+  function decodeText(raw) {
+    let body = raw, mime = '';
+    const head = /^\s*data:([^;,]*)((?:;[^;,]*)*),/i.exec(raw);
+    if (head) {
+      if (!/;base64/i.test(head[2])) return { error: tr('msg.badDataUrl') };
+      mime = head[1].toLowerCase();
+      body = raw.slice(head[0].length);
+    }
+    let clean = '', pos = head ? head[0].length : 0;
+    for (const ch of body) {
+      pos += ch.length;
+      if (/\s/.test(ch)) continue;
+      if (!/[A-Za-z0-9+/=_-]/.test(ch)) return { error: tr('msg.badChar', [...raw.slice(0, pos)].length, JSON.stringify(ch)) };
+      clean += ch;
+    }
+    if (/=[^=]/.test(clean)) return { error: tr('msg.badPad') };
+    clean = clean.replace(/=+$/, '').replace(/-/g, '+').replace(/_/g, '/');
+    if (clean.length % 4 === 1) return { error: tr('msg.badLen', clean.length) };
+    const bin = atob(clean + '='.repeat((4 - clean.length % 4) % 4));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return { bytes, mime };
+  }
+
+  function asText(bytes) {
+    try {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      return /[\u0000-\u0008\u000E-\u001F\u007F]/.test(text) ? null : text;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function hexDump(bytes) {
+    const lines = [];
+    const n = Math.min(bytes.length, HEX_PREVIEW);
+    for (let off = 0; off < n; off += 16) {
+      const row = bytes.subarray(off, Math.min(off + 16, n));
+      const hex = Array.from(row, (b) => b.toString(16).padStart(2, '0'));
+      const left = hex.slice(0, 8).join(' '), right = hex.slice(8).join(' ');
+      const ascii = Array.from(row, (b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('');
+      lines.push(off.toString(16).padStart(8, '0') + '  ' + left.padEnd(23) + '  ' + right.padEnd(23) + '  |' + ascii + '|');
+    }
+    if (bytes.length > HEX_PREVIEW) lines.push('', tr('hex.more', HEX_PREVIEW, bytes.length));
+    return lines.join('\n');
+  }
+
+  function guessExt(bytes, mime) {
+    if (EXT_BY_MIME[mime]) return EXT_BY_MIME[mime];
+    const sig = Array.from(bytes.subarray(0, 12), (b) => b.toString(16).padStart(2, '0')).join('');
+    if (sig.startsWith('89504e47')) return 'png';
+    if (sig.startsWith('ffd8ff')) return 'jpg';
+    if (sig.startsWith('47494638')) return 'gif';
+    if (sig.startsWith('25504446')) return 'pdf';
+    if (sig.startsWith('504b0304')) return 'zip';
+    if (sig.startsWith('52494646') && sig.slice(16, 24) === '57454250') return 'webp';
+    return 'bin';
+  }
+
+  function show(text) {
+    output.value = text.length > MAX_SHOWN ? text.slice(0, MAX_SHOWN) : text;
+    output.scrollTop = 0;
+    $('outMeta').textContent = text ? tr('meta.chars', text.length.toLocaleString()) : '';
+  }
+
+  function run() {
+    input.placeholder = tr(mode === 'encode' ? 'ph.encode' : 'ph.decode');
+    $('optDataUrl').disabled = mode === 'decode';
+    $('optUrlSafe').disabled = $('optNoPad').disabled = mode === 'decode' || $('optDataUrl').checked;
+    $('modeEncode').setAttribute('aria-pressed', String(mode === 'encode'));
+    $('modeDecode').setAttribute('aria-pressed', String(mode === 'decode'));
+    input.hidden = Boolean(file);
+    $('fileCard').hidden = !file;
+    $('inMeta').textContent = file ? tr('meta.file', Toolbox.fmtBytes(file.bytes.length))
+      : input.value ? tr('meta.chars', input.value.length.toLocaleString()) : '';
+
+    result = { text: '', bytes: null, mime: '', binary: false };
+    if (!file && !input.value) { show(''); setStatus('idle'); return; }
+
+    if (mode === 'encode') {
+      const bytes = file ? file.bytes : new TextEncoder().encode(input.value);
+      const mime = file ? file.mime : 'text/plain;charset=utf-8';
+      result.text = encodeBytes(bytes, mime);
+      result.mime = 'text/plain';
+      show(result.text);
+      const big = result.text.length > MAX_SHOWN;
+      if (big) setStatus('warn', tr('msg.truncated', Toolbox.fmtBytes(result.text.length)), 'badge.ok');
+      else setStatus('ok', tr('msg.encoded', Toolbox.fmtBytes(bytes.length), result.text.length.toLocaleString()));
+      return;
+    }
+
+    const decoded = decodeText(input.value);
+    if (decoded.error) { show(''); setStatus('err', decoded.error); return; }
+    result.bytes = decoded.bytes;
+    result.mime = decoded.mime;
+    const text = asText(decoded.bytes);
+    if (text === null) {
+      result.binary = true;
+      show(hexDump(decoded.bytes));
+      setStatus('warn', tr('msg.binary', Toolbox.fmtBytes(decoded.bytes.length)));
+      return;
+    }
+    result.text = text;
+    show(text);
+    setStatus('ok', tr('msg.decoded', Toolbox.fmtBytes(decoded.bytes.length)));
+  }
+
+  function setMode(next) {
+    if (mode === next) return;
+    mode = next;
+    if (next === 'decode') file = null;
+    run();
+  }
+
+  function loadFile(f) {
+    if (!f) return;
+    if (f.size > MAX_FILE) { page.toast(tr('toast.tooBig')); return; }
+    f.arrayBuffer().then((buf) => {
+      file = { name: f.name, bytes: new Uint8Array(buf), mime: f.type || 'application/octet-stream' };
+      mode = 'encode';
+      $('fileName').textContent = f.name;
+      $('fileSize').textContent = Toolbox.fmtBytes(f.size);
+      $('fileType').textContent = file.mime;
+      run();
+      page.toast(tr('toast.loaded', f.name));
+    }, () => page.toast(tr('toast.readFail')));
+  }
+
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 120); });
+  $('modeEncode').addEventListener('click', () => setMode('encode'));
+  $('modeDecode').addEventListener('click', () => setMode('decode'));
+  ['optUrlSafe', 'optNoPad', 'optDataUrl'].forEach((id) => $(id).addEventListener('change', run));
+  $('btnOpen').addEventListener('click', () => $('file').click());
+  $('file').addEventListener('change', (e) => { loadFile(e.target.files[0]); e.target.value = ''; });
+  $('btnUseText').addEventListener('click', () => { file = null; run(); input.focus(); });
+  $('btnSample').addEventListener('click', () => {
+    file = null;
+    const sample = tr('sample');
+    input.value = mode === 'encode' ? sample : bytesToBase64(new TextEncoder().encode(sample));
+    run();
+  });
+  $('btnSwap').addEventListener('click', () => {
+    if (result.binary) { page.toast(tr('toast.binSwap')); return; }
+    if (!result.text) { page.toast(tr('toast.empty')); return; }
+    input.value = result.text;
+    file = null;
+    mode = mode === 'encode' ? 'decode' : 'encode';
+    run();
+  });
+  $('btnClear').addEventListener('click', () => {
+    input.value = '';
+    file = null;
+    run();
+    input.focus();
+    page.toast(tr('toast.cleared'));
+  });
+  $('btnCopy').addEventListener('click', () => {
+    if (result.binary) { page.toast(tr('toast.binCopy')); return; }
+    page.copy(result.text);
+  });
+  $('btnDownload').addEventListener('click', () => {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    if (mode === 'decode' && result.bytes) {
+      const ext = result.binary ? guessExt(result.bytes, result.mime) : 'txt';
+      page.download(new Blob([result.bytes], { type: result.mime || 'application/octet-stream' }), 'base64-decoded-' + stamp + '.' + ext);
+    } else {
+      page.download(result.text, 'base64-' + stamp + '.txt');
+    }
+  });
+
+  ['dragenter', 'dragover'].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.add('dragging'); }));
+  ['dragleave', 'drop'].forEach((ev) => document.addEventListener(ev, (e) => {
+    e.preventDefault();
+    if (ev === 'dragleave' && e.relatedTarget) return;
+    document.body.classList.remove('dragging');
+  }));
+  document.addEventListener('drop', (e) => { const f = e.dataTransfer && e.dataTransfer.files[0]; if (f) loadFile(f); });
+
+  run();
+})();
+</script>
+</body>
+</html>

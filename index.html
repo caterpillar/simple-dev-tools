@@ -1,11 +1,213 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
-	<meta charset="utf-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>hello world</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>开发者工具箱</title>
+<meta name="description" content="本地离线开发者工具箱：JSON、时间戳、Base64、文本对比、URL 编码、JWT 与 Cron 解析，数据不离开本机。">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="toolbox.css">
+<script src="toolbox-nav.js"></script>
+<style>
+  main { flex: 1 1 auto; overflow-y: auto; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 56px 24px 72px; }
+
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin: 0 0 16px; padding: 3px 10px;
+    font-size: 12px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 999px;
+  }
+  .eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .hero h1 { margin: 0 0 12px; font-size: 34px; line-height: 1.2; font-weight: 700; letter-spacing: -.3px; }
+  .hero p { margin: 0; max-width: 640px; font-size: 15px; color: var(--muted); }
+
+  section + section { margin-top: 48px; }
+  h2 {
+    margin: 0 0 16px;
+    font-size: 12px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .tool-card {
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 20px;
+    color: inherit; text-decoration: none;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    transition: border-color .18s, transform .18s, box-shadow .18s;
+  }
+  .tool-card:hover { border-color: var(--hover-border); transform: translateY(-2px); box-shadow: 0 12px 28px -14px var(--shadow); }
+  .tool-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tool-head { display: flex; align-items: center; gap: 12px; }
+  .tool-icon {
+    flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px; border-radius: 9px;
+    background: var(--hover); color: var(--accent);
+  }
+  .tool-icon svg { width: 20px; height: 20px; }
+  .tool-card h3 { margin: 0; font-size: 16px; font-weight: 650; }
+  .tool-card p { margin: 0; font-size: 13.5px; color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+  .chips li {
+    padding: 2px 8px;
+    font-size: 12px; color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 999px;
+  }
+  .tool-open {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: auto; padding-top: 4px;
+    font-size: 13px; font-weight: 600; color: var(--accent);
+  }
+  .tool-open svg { width: 14px; height: 14px; transition: transform .18s; }
+  .tool-card:hover .tool-open svg { transform: translateX(3px); }
+
+  .feature-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+  .feature { padding: 16px; border: 1px solid var(--border); border-radius: 10px; }
+  .feature svg { width: 20px; height: 20px; color: var(--accent); }
+  .feature h3 { margin: 10px 0 4px; font-size: 14px; font-weight: 650; }
+  .feature p { margin: 0; font-size: 13px; color: var(--muted); }
+  @media (max-width: 860px) { .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 520px) {
+    .wrap { padding: 32px 16px 48px; }
+    .hero h1 { font-size: 26px; }
+    .feature-grid, .tool-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
 </head>
 <body>
-<h1>hello world</h1>
+<header class="titlebar">
+  <nav class="tool-tabs" id="toolTabs" data-current="home"></nav>
+  <div class="titlebar-right" id="toolboxControls"></div>
+</header>
+
+<main>
+  <div class="wrap">
+    <section class="hero">
+      <p class="eyebrow" data-i18n="eyebrow"></p>
+      <h1 data-i18n="brand"></h1>
+      <p data-i18n="lead"></p>
+    </section>
+
+    <section aria-labelledby="toolsTitle">
+      <h2 id="toolsTitle" data-i18n="tools"></h2>
+      <div class="tool-grid" id="toolGrid"></div>
+    </section>
+
+    <section aria-labelledby="featuresTitle">
+      <h2 id="featuresTitle" data-i18n="features"></h2>
+      <div class="feature-grid" id="featureGrid"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  const FEATURE_ICONS = [
+    ['M12 20h.01', 'M8.5 16.43a5 5 0 0 1 7 0', 'M5 12.86a10 10 0 0 1 5.17-2.69', 'M19 12.86a10 10 0 0 0-2-1.52', 'M2 8.82a15 15 0 0 1 4.18-2.64', 'M22 8.82a15 15 0 0 0-11.29-3.76', 'm2 2 20 20'],
+    ['M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z', 'm9 12 2 2 4-4'],
+    ['M12 3a9 9 0 1 0 0 18c.95 0 1.6-.72 1.6-1.6 0-.44-.18-.83-.44-1.14-.26-.32-.42-.7-.42-1.1 0-.95.76-1.7 1.7-1.7h1.72A5.24 5.24 0 0 0 21.4 10C21.4 5.9 17.4 3 12 3z', 'M7.5 11.5h.01', 'M10.5 7.5h.01', 'M15.5 8h.01'],
+    ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M3 12h18', 'M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z']
+  ];
+
+  const TEXT = {
+    'zh-CN': {
+      eyebrow: '本地 · 离线 · 免安装',
+      lead: '常用开发小工具合集，双击打开即可使用。所有处理都在浏览器本地完成，数据不会上传。',
+      tools: '工具', open: '打开', features: '特点',
+      f: [['离线可用', '无需网络与安装，打开文件即可使用'], ['数据安全', '内容只在本机处理，不发送到任何服务器'],
+        ['7 种主题', '深色、浅色随心切换，各工具共用'], ['8 种语言', '自动跟随浏览器语言，也可手动切换']]
+    },
+    'zh-TW': {
+      eyebrow: '本機 · 離線 · 免安裝',
+      lead: '常用開發小工具合集，雙擊開啟即可使用。所有處理都在瀏覽器本機完成，資料不會上傳。',
+      tools: '工具', open: '開啟', features: '特色',
+      f: [['離線可用', '無需網路與安裝，開啟檔案即可使用'], ['資料安全', '內容只在本機處理，不會傳送到任何伺服器'],
+        ['7 種主題', '深色、淺色隨心切換，各工具共用'], ['8 種語言', '自動跟隨瀏覽器語言，也可手動切換']]
+    },
+    en: {
+      eyebrow: 'Local · Offline · No install',
+      lead: 'A collection of everyday developer tools that open with a double-click. Everything runs locally in your browser — nothing is uploaded.',
+      tools: 'Tools', open: 'Open', features: 'Highlights',
+      f: [['Works offline', 'No network or installation — just open the file'], ['Private by design', 'Data is processed on this machine and never sent anywhere'],
+        ['7 themes', 'Dark and light themes, shared by every tool'], ['8 languages', 'Follows your browser language, or pick one yourself']]
+    },
+    ja: {
+      eyebrow: 'ローカル · オフライン · インストール不要',
+      lead: 'よく使う開発用ツールをまとめました。ダブルクリックで開くだけ。処理はすべてブラウザ内で完結し、データは送信されません。',
+      tools: 'ツール', open: '開く', features: '特長',
+      f: [['オフラインで動作', 'ネットワークもインストールも不要'], ['データは手元に', '内容はこの端末内だけで処理され、外部に送信されません'],
+        ['7 種類のテーマ', 'ダーク・ライトを切り替え、全ツールで共通'], ['8 か国語', 'ブラウザの言語に自動追従、手動でも切り替え可能']]
+    },
+    ko: {
+      eyebrow: '로컬 · 오프라인 · 설치 불필요',
+      lead: '자주 쓰는 개발 도구 모음입니다. 더블클릭으로 바로 사용하세요. 모든 처리는 브라우저에서 로컬로 이루어지며 데이터는 업로드되지 않습니다.',
+      tools: '도구', open: '열기', features: '특징',
+      f: [['오프라인 사용', '네트워크와 설치가 필요 없습니다'], ['안전한 데이터', '내용은 이 컴퓨터에서만 처리되며 어디에도 전송되지 않습니다'],
+        ['7가지 테마', '다크·라이트 테마를 모든 도구에서 공유'], ['8개 언어', '브라우저 언어를 자동으로 따르며 직접 선택도 가능']]
+    },
+    es: {
+      eyebrow: 'Local · Sin conexión · Sin instalación',
+      lead: 'Una colección de herramientas de uso diario que se abren con doble clic. Todo se procesa localmente en el navegador; no se sube ningún dato.',
+      tools: 'Herramientas', open: 'Abrir', features: 'Características',
+      f: [['Funciona sin conexión', 'Sin red ni instalación: basta con abrir el archivo'], ['Datos privados', 'El contenido se procesa en este equipo y nunca se envía'],
+        ['7 temas', 'Temas oscuros y claros compartidos por todas las herramientas'], ['8 idiomas', 'Sigue el idioma del navegador o elígelo tú']]
+    },
+    fr: {
+      eyebrow: 'Local · Hors ligne · Sans installation',
+      lead: 'Une collection d’outils du quotidien qui s’ouvrent d’un double-clic. Tout est traité localement dans le navigateur : aucune donnée n’est envoyée.',
+      tools: 'Outils', open: 'Ouvrir', features: 'Points forts',
+      f: [['Fonctionne hors ligne', 'Ni réseau ni installation : ouvrez simplement le fichier'], ['Données privées', 'Le contenu est traité sur cette machine et n’est jamais envoyé'],
+        ['7 thèmes', 'Thèmes sombres et clairs, partagés par tous les outils'], ['8 langues', 'Suit la langue du navigateur, ou choisissez-la vous-même']]
+    },
+    de: {
+      eyebrow: 'Lokal · Offline · Ohne Installation',
+      lead: 'Eine Sammlung alltäglicher Entwicklerwerkzeuge – per Doppelklick einsatzbereit. Alles läuft lokal im Browser, es werden keine Daten hochgeladen.',
+      tools: 'Werkzeuge', open: 'Öffnen', features: 'Merkmale',
+      f: [['Funktioniert offline', 'Kein Netzwerk, keine Installation – Datei einfach öffnen'], ['Daten bleiben privat', 'Inhalte werden nur auf diesem Rechner verarbeitet und nie übertragen'],
+        ['7 Farbschemata', 'Dunkle und helle Themes, von allen Werkzeugen geteilt'], ['8 Sprachen', 'Folgt der Browsersprache oder wird manuell gewählt']]
+    }
+  };
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function render(lang) {
+    const t = TEXT[lang] || TEXT.en;
+    document.getElementById('toolGrid').replaceChildren(...Toolbox.tools.filter((tool) => tool.desc).map((tool) => {
+      const card = el('a', 'tool-card');
+      card.href = tool.href;
+      const head = el('div', 'tool-head');
+      const badge = el('span', 'tool-icon');
+      badge.appendChild(Toolbox.icon(tool.icon));
+      head.append(badge, el('h3', '', Toolbox.pick(tool.name, lang)));
+      const chips = el('ul', 'chips');
+      Toolbox.pick(tool.features, lang).forEach((f) => chips.appendChild(el('li', '', f)));
+      const open = el('span', 'tool-open', t.open);
+      open.appendChild(Toolbox.icon(['M5 12h14', 'm12 5 7 7-7 7']));
+      card.append(head, el('p', '', Toolbox.pick(tool.desc, lang)), chips, open);
+      return card;
+    }));
+    document.getElementById('featureGrid').replaceChildren(...t.f.map(([title, desc], i) => {
+      const item = el('div', 'feature');
+      item.append(Toolbox.icon(FEATURE_ICONS[i]), el('h3', '', title), el('p', '', desc));
+      return item;
+    }));
+  }
+
+  const page = Toolbox.initPage({ current: 'home', text: TEXT, onLang: render });
+  render(page.lang);
+})();
+</script>
 </body>
 </html>
